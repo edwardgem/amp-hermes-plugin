@@ -1,0 +1,10 @@
+name: amp-governance
+version: "0.1.0"
+description: "AMP governance plugin for Hermes. Normalizes selected Hermes tools into AMP eval-policy actions, logs activity, and enforces allow/block/HITL decisions before execution."
+author: "Inquiryon"
+hooks:
+  - on_session_start
+  - on_session_finalize
+  - pre_llm_call
+  - pre_tool_call
+  - post_tool_call

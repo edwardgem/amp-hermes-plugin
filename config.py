@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import os
+from pathlib import Path
+from typing import Dict
+
+
+def _hermes_home() -> Path:
+    raw = os.environ.get("HERMES_HOME", "").strip()
+    return Path(raw).expanduser() if raw else Path.home() / ".hermes"
+
+
+def _read_env_file(path: Path) -> Dict[str, str]:
+    values: Dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if (
+            (value.startswith('"') and value.endswith('"'))
+            or (value.startswith("'") and value.endswith("'"))
+        ):
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def _env_value(key: str, env_file: Dict[str, str], *aliases: str) -> str:
+    for name in (key, *aliases):
+        value = os.environ.get(name)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+        if name in env_file and str(env_file[name]).strip():
+            return str(env_file[name]).strip()
+    return ""
+
+
+def _int_value(env_file: Dict[str, str], default: int, *names: str) -> int:
+    for name in names:
+        raw = _env_value(name, env_file)
+        if not raw:
+            continue
+        try:
+            return int(raw)
+        except ValueError:
+            continue
+    return default
+
+
+def _bool_value(env_file: Dict[str, str], default: bool, *names: str) -> bool:
+    truthy = {"1", "true", "yes", "on"}
+    falsy = {"0", "false", "no", "off"}
+    for name in names:
+        raw = _env_value(name, env_file).lower()
+        if raw in truthy:
+            return True
+        if raw in falsy:
+            return False
+    return default
+
+
+@dataclass(frozen=True)
+class AmpConfig:
+    backend_url: str
+    api_key: str
+    org_id: str
+    agent_name: str
+    username: str
+    hitl_timeout_minutes: int
+    hitl_poll_interval_seconds: int
+    fail_closed: bool
+
+    @property
+    def is_configured(self) -> bool:
+        return all(
+            [
+                self.backend_url,
+                self.api_key,
+                self.org_id,
+                self.agent_name,
+                self.username,
+            ]
+        )
+
+
+def load_config() -> AmpConfig:
+    env_file = _read_env_file(_hermes_home() / ".env")
+    backend_url = _env_value("AMP_BACKEND_URL", env_file)
+    api_key = _env_value("AMP_API_KEY", env_file)
+    org_id = _env_value("AMP_ORG_ID", env_file)
+    username = _env_value("AMP_USERNAME", env_file)
+    agent_name = _env_value("AMP_AGENT_NAME", env_file, "AGENT_NAME")
+    return AmpConfig(
+        backend_url=backend_url.rstrip("/"),
+        api_key=api_key.removeprefix("Bearer ").removeprefix("bearer ").strip(),
+        org_id=org_id,
+        agent_name=agent_name,
+        username=username,
+        hitl_timeout_minutes=_int_value(
+            env_file,
+            10,
+            "AMP_HITL_TIMEOUT_MINUTES",
+            "HITL_TIMEOUT_MINUTES",
+        ),
+        hitl_poll_interval_seconds=_int_value(
+            env_file,
+            3,
+            "AMP_HITL_POLL_INTERVAL_SECONDS",
+        ),
+        fail_closed=_bool_value(env_file, True, "AMP_FAIL_CLOSED"),
+    )
