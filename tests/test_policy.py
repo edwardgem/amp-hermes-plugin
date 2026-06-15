@@ -30,7 +30,7 @@ class NormalizeToolCallTests(unittest.TestCase):
     def test_search_files_maps_to_read_search(self) -> None:
         action = normalize_tool_call(
             "search_files",
-            {"pattern": "*policy*", "target": "files", "path": "/Users/edwardc/Projects/agents"},
+            {"pattern": "*policy*", "target": "files", "path": "/tmp/agents"},
         )
         self.assertIsNotNone(action)
         assert action is not None
@@ -39,7 +39,7 @@ class NormalizeToolCallTests(unittest.TestCase):
         self.assertEqual(action.context["pattern"], "*policy*")
         self.assertEqual(action.context["query"], "*policy*")
         self.assertEqual(action.context["target"], "files")
-        self.assertEqual(action.context["path"], "/Users/edwardc/Projects/agents")
+        self.assertEqual(action.context["path"], "/tmp/agents")
 
     def test_patch_maps_to_write_edit(self) -> None:
         action = normalize_tool_call("patch", {"path": "/tmp/b.txt"})
