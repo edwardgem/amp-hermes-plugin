@@ -97,7 +97,7 @@ ln -s /path/to/amp-hermes-plugin ~/.hermes/plugins/amp-governance
 
 ## Step 1 — enable the plugin
 
-Run:
+Before configuring AMP governance, first install Hermes in your environment and verify that Hermes is working correctly. Once Hermes is running successfully, enable this plugin:
 
 ```bash
 hermes plugins enable amp-governance
@@ -105,18 +105,20 @@ hermes plugins enable amp-governance
 
 ## Step 2 — register your Hermes agent in AMP
 
-Before this plugin can govern Hermes, your Hermes agent must exist in AMP.
+Before this plugin can govern Hermes, your Hermes agent must be registered in AMP.
 
 If you are using AMP UI:
 
-1. Open your AMP environment
-2. Go to **Agent Launchpad**
-3. Create or register a new external agent for Hermes
-4. Select **Allow auto-start** if this Hermes agent should be allowed to create and run instances without UI approval
-5. Click **Register**
-6. Copy the generated values for:
+1. Create a user account at amp.inquiryon.com if you haven't done so.
+2. Login to AMP (amp.inquiryon.com).
+3. Go to **Agent Launchpad**
+4. Create / register a new remote agent for Hermes.
+5. Use a name or put in a description that relates to Hermes so that AMP AI can help you select a relevant policy.
+6. Select **Allow auto-start** at the Registration popup.
+7. Click **Register**
+8. Create an AMP API Key if you do not have one.
+9. Copy the generated values for:
    - `AMP_API_KEY`
-   - `AMP_ORG_ID`
    - `AMP_AGENT_NAME`
 
 ## Step 3 — add AMP settings to Hermes
@@ -127,9 +129,10 @@ Copy `.env.example` into your Hermes home as `~/.hermes/.env`, then fill in your
 AMP_BACKEND_URL=https://amp.inquiryon.com
 AMP_USERNAME=your_name@email_domain.com
 AMP_API_KEY=amp_k_...
-AMP_ORG_ID=O-0011-AB20260501090030
-AMP_AGENT_NAME=hermes-agent-10c8
+AMP_ORG_ID=O-0011-AB202605010...
+AMP_AGENT_NAME=your-hermes-agent-10c8
 ```
+You can find your username and org_id in **My Profile** on the side menu in AMP.
 
 Optional settings:
 
@@ -163,13 +166,13 @@ At minimum, that policy should define rules for the normalized tool/action pairs
 
 If you are using AMP UI:
 
-1. Open your AMP environment
-2. Go to **Agent Launchpad**
-3. Open your Hermes agent by clicking on its tile
-4. On the side menu, under **Governance**, choose **Write New Policy**
-5. Choose **eval-policy**
-6. Use AI on the page to help create a Hermes policy sample
-7. Create and activate the policy
+1. Login to amp.inquiryon.com
+2. Go to **Agent Launchpad**.
+3. Open your Hermes agent created above by clicking on its tile.
+4. On the side menu, under **Governance**, choose **Write New Policy**.
+5. Choose **eval-policy**.
+6. Click on the AI icon on the page and use AI to help suggest a Hermes policy sample.
+7. Create and activate the policy by following the screen instruction.
 
 ## Step 6 — test the integration
 
