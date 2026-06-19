@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
 import logging
+import re
 import time
 from typing import Any, Dict, Optional
 
@@ -19,6 +22,44 @@ def _truncate(value: str, limit: int = 220) -> str:
     return f"{text[:limit - 3]}..."
 
 
+_FRESHNESS_PATTERNS = [
+    re.compile(r"\b(today|latest|current|currently|recent|now|right now)\b", re.IGNORECASE),
+    re.compile(r"\b(this week|this month|this year)\b", re.IGNORECASE),
+    re.compile(r"\b(live|up-to-date|up to date|as of)\b", re.IGNORECASE),
+]
+
+_LIVE_DATA_DOMAIN_PATTERNS = [
+    re.compile(r"\b(stock|market|markets|share price|price|prices|earnings|index|indices)\b", re.IGNORECASE),
+    re.compile(r"\b(news|headline|headlines|weather|forecast|sports|score|scores)\b", re.IGNORECASE),
+]
+
+_EXPLICIT_SEARCH_PATTERNS = [
+    re.compile(r"\b(web search|search the web|look up|lookup|find online|search online)\b", re.IGNORECASE),
+]
+
+
+def _needs_live_web_search(user_message: str) -> bool:
+    text = str(user_message or "").strip()
+    if not text:
+        return False
+    has_freshness = any(pattern.search(text) for pattern in _FRESHNESS_PATTERNS)
+    has_live_domain = any(pattern.search(text) for pattern in _LIVE_DATA_DOMAIN_PATTERNS)
+    has_explicit_search = any(pattern.search(text) for pattern in _EXPLICIT_SEARCH_PATTERNS)
+    return has_explicit_search or (has_freshness and has_live_domain)
+
+
+def _build_live_search_context(user_message: str) -> str:
+    now = datetime.now(timezone.utc)
+    today_utc = f"{now.strftime('%B')} {now.day}, {now.year}"
+    return (
+        f"Current UTC date: {today_utc}.\n"
+        "The user's request appears time-sensitive or explicitly asks for live information.\n"
+        "Do not answer from memory for this request.\n"
+        "Use the web_search tool first to verify current facts before answering.\n"
+        "If live search is unavailable, state that you cannot verify current information."
+    )
+
+
 class AmpGovernancePlugin:
     def __init__(self) -> None:
         self._config: AmpConfig = load_config()
@@ -26,6 +67,7 @@ class AmpGovernancePlugin:
         self._store = SessionStore()
         self._warned_unconfigured = False
         self._blocked_turn_messages: Dict[str, str] = {}
+        self._dispatch_tool = None
 
     def _warn_unconfigured(self) -> None:
         if self._warned_unconfigured:
@@ -77,6 +119,39 @@ class AmpGovernancePlugin:
             return ""
         return self._blocked_turn_messages.pop(session_id, "")
 
+    def attach_context(self, ctx: Any) -> None:
+        self._dispatch_tool = getattr(ctx, "dispatch_tool", None)
+
+    def _build_slack_target(self) -> str:
+        try:
+            from gateway.session_context import get_session_env
+        except Exception:
+            return ""
+        platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip().lower()
+        if platform != "slack":
+            return ""
+        chat_id = str(get_session_env("HERMES_SESSION_CHAT_ID", "") or "").strip()
+        if not chat_id:
+            return ""
+        thread_id = str(get_session_env("HERMES_SESSION_THREAD_ID", "") or "").strip()
+        return f"slack:{chat_id}:{thread_id}" if thread_id else f"slack:{chat_id}"
+
+    def _notify_slack(self, message: str) -> None:
+        if not callable(self._dispatch_tool):
+            return
+        target = self._build_slack_target()
+        if not target:
+            return
+        try:
+            raw = self._dispatch_tool("send_message", {"target": target, "message": f"[AMP]\n{message}"})
+            if not raw:
+                return
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(payload, dict) and payload.get("error"):
+                logger.warning("amp-governance slack notify failed: %s", payload["error"])
+        except Exception as exc:
+            logger.warning("amp-governance slack notify failed: %s", exc)
+
     def _evaluate_governance(
         self,
         instance_id: str,
@@ -117,6 +192,10 @@ class AmpGovernancePlugin:
                 f"HITL requested | raw_tool={action.raw_tool_name} | waiting_for={self._config.username}",
                 level="WARN",
             )
+            self._notify_slack(
+                f'AMP is waiting for a human reviewer to approve "{action.raw_tool_name}" before continuing. '
+                "This action is paused pending review."
+            )
             while time.time() < deadline:
                 time.sleep(max(self._config.hitl_poll_interval_seconds, 1))
                 try:
@@ -134,10 +213,22 @@ class AmpGovernancePlugin:
                     level="WARN" if resolution not in {"approve", "approved", "modify", "modified"} else "INFO",
                 )
                 if resolution in {"approve", "approved", "modify", "modified"}:
+                    approval_message = (
+                        f'AMP review approved "{action.raw_tool_name}" with modifications. Continuing now.'
+                        if resolution in {"modify", "modified"}
+                        else f'AMP review approved "{action.raw_tool_name}". Continuing now.'
+                    )
+                    self._notify_slack(approval_message)
                     return None
+                self._notify_slack(
+                    f'AMP reviewer rejected "{action.raw_tool_name}".{f" {info}" if info else ""}'
+                )
                 return self._block_message(
                     f'{action.raw_tool_name} was rejected by AMP HITL review.{f" {info}" if info else ""}'
                 )
+            self._notify_slack(
+                f'AMP review timed out for "{action.raw_tool_name}". The action was blocked.'
+            )
             return self._block_message(
                 f'{action.raw_tool_name} timed out waiting for AMP HITL approval.'
             )
@@ -184,6 +275,10 @@ class AmpGovernancePlugin:
             instance_id = self._ensure_instance(session_id, model=model, platform=platform)
             if user_message:
                 self._safe_log(instance_id, f"User prompt: {_truncate(user_message)}")
+            if _needs_live_web_search(user_message):
+                context = _build_live_search_context(user_message)
+                self._safe_log(instance_id, "Freshness routing | injected live-search context")
+                return {"context": context}
         except Exception as exc:
             logger.warning("amp-governance pre_llm_call failed: %s", exc)
         return None
@@ -271,6 +366,7 @@ _PLUGIN = AmpGovernancePlugin()
 
 
 def register(ctx) -> None:
+    _PLUGIN.attach_context(ctx)
     ctx.register_hook("on_session_start", _PLUGIN.on_session_start)
     ctx.register_hook("on_session_finalize", _PLUGIN.on_session_finalize)
     ctx.register_hook("pre_llm_call", _PLUGIN.pre_llm_call)

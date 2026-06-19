@@ -10,6 +10,8 @@ This plugin connects a Hermes agent to AMP so AMP can:
 - evaluate tool calls against an AMP `eval-policy`
 - require HITL approval when the policy says so
 - block governed actions when AMP rejects them
+- add date-aware routing context for time-sensitive prompts so Hermes is more likely to use `web_search` for current information
+- notify the active Hermes channel when AMP is waiting for human review and when that review is resolved
 
 ## What this plugin governs
 
@@ -21,6 +23,13 @@ Hermes tools are normalized into AMP policy vocabulary like this:
 - `write_file` → `write/write`
 - `patch` → `write/edit`
 - `web_search` → `exec/web_search`
+
+## Additional behavior
+
+Besides tool governance, the plugin also improves two parts of the Hermes user experience:
+
+- for prompts that appear time-sensitive or explicitly ask for live information, the plugin injects current-date context and tells Hermes to use `web_search` instead of answering from memory
+- when AMP triggers HITL, the plugin uses Hermes `send_message` to notify the active channel that the action is waiting for human review, then posts a follow-up when the reviewer approves, modifies, rejects, or times out the request
 
 ## Prerequisites
 
@@ -183,14 +192,18 @@ Examples:
 - `Can you run git status in ~/Projects/my-repo?`
 - `Can you read ~/Projects/my-repo/README.md?`
 - `Can you search for files named policy.json under ~/Projects/agents/?`
+- `How did the US market perform today?`
+- `Please perform a web search for the latest news about social security fraud in the US.`
 
 Expected behavior:
 
 - AMP should log the Hermes session and tool activity
 - safe actions should proceed normally
+- time-sensitive or explicitly live-information prompts should be routed toward `web_search` using injected current-date context
 - blocked actions should return:
   - `This request is blocked by AMP governance. No action was taken.`
 - HITL actions should pause until a reviewer approves or rejects them in AMP
+- when Hermes is running in a messaging surface such as Slack, the plugin should post a channel message when AMP is waiting for review and another message when the review is resolved
 
 ## How to verify it is working
 
@@ -208,6 +221,14 @@ You should see AMP entries similar to:
 - policy check for a normalized tool/action
 - policy decision
 - HITL requested, if approval is required
+
+For time-sensitive prompts, you should also see Hermes use `web_search` instead of answering only from model memory.
+
+For HITL prompts in Slack, you should also see channel messages similar to:
+
+- `[AMP] AMP is waiting for a human reviewer to approve "web_search" before continuing. This action is paused pending review.`
+- `[AMP] AMP reviewer approved "web_search". Continuing now.`
+- `[AMP] AMP reviewer rejected "web_search". ...`
 
 ## Common issues
 
