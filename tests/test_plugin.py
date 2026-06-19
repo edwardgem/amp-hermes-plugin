@@ -20,6 +20,12 @@ class FreshnessRoutingTests(unittest.TestCase):
     def test_detects_time_sensitive_market_query(self) -> None:
         self.assertTrue(_needs_live_web_search("How did the US market perform today?"))
 
+    def test_detects_yesterday_market_query(self) -> None:
+        self.assertTrue(_needs_live_web_search("How does the market in China and HK perform yesterday?"))
+
+    def test_detects_last_week_market_query(self) -> None:
+        self.assertTrue(_needs_live_web_search("How did the US market perform last week?"))
+
     def test_detects_explicit_web_search_request(self) -> None:
         self.assertTrue(_needs_live_web_search("Perform a web search to find social security fraud news in the US"))
 

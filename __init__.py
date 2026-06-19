@@ -24,7 +24,11 @@ def _truncate(value: str, limit: int = 220) -> str:
 
 _FRESHNESS_PATTERNS = [
     re.compile(r"\b(today|latest|current|currently|recent|now|right now)\b", re.IGNORECASE),
-    re.compile(r"\b(this week|this month|this year)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(yesterday|tomorrow|tonight|this morning|this afternoon|this evening|last night)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(this week|this month|this year|last week|last month|last year)\b", re.IGNORECASE),
     re.compile(r"\b(live|up-to-date|up to date|as of)\b", re.IGNORECASE),
 ]
 
