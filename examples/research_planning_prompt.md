@@ -1,12 +1,12 @@
 <!--
-Phase 3B reference material — NOT loaded by AHP today.
-
-A future research-agent skill would render this template with the contents of
-research_topics.yaml and pass it to an LLM to produce the structured plan dict
-that gets submitted to AHP's evaluate_proposed_plan(session_id, plan). AHP does
-not call an LLM, load this file, or otherwise know this prompt exists — it only
-consumes the resulting plan dict. This template is intentionally model-neutral
-(no provider-specific instructions or formatting).
+Read at runtime by skills/research-agent/SKILL.md (step 2, via read_file) at
+its documented install path, ~/.hermes/plugins/amp-governance/examples/
+research_planning_prompt.md. The skill's own conversational turn follows
+these instructions to produce the plan JSON it submits to
+amp_evaluate_research_plan — AHP's Python code never calls an LLM or reads
+this file itself; only the model does, inside a normal governed turn. This
+template is intentionally model-neutral (no provider-specific instructions
+or formatting).
 -->
 
 # Research Execution Planning

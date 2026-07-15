@@ -47,9 +47,17 @@ When AMP triggers HITL, the plugin sends a notification back to the originating 
 AMP_NOTIFICATIONS_ENABLED=true
 ```
 
+## Scope: what Phase 2A/2B actually covers
+
+Phase 2A/2B instrument LLM calls made through Hermes' **normal conversational agent loop** — the `pre_api_request`/`post_api_request` hooks and `llm_execution` middleware that fire on every provider call inside `agent/conversation_loop.py`. Every "every LLM call" statement below means every call on *that* path.
+
+They do **not** cover calls a plugin makes via `ctx.llm.complete()` / `ctx.llm.complete_structured()` (the host-owned LLM facade documented at `agent/plugin_llm.py`). That facade calls `agent/auxiliary_client.py::call_llm()` directly and never touches `pre_api_request`, `post_api_request`, or `llm_execution` — verified by inspecting `agent/auxiliary_client.py`, which has no hook-invocation code at all. A plugin LLM call made this way is invisible to AHP's observation and enforcement, full stop.
+
+This is why the Phase 3B research-agent skill (below) deliberately never uses `ctx.llm` for planning or research — every step of that workflow runs as the model's own normal conversational turn specifically so it stays inside AHP's actual coverage.
+
 ## LLM usage observation (Phase 2A)
 
-When enabled, the plugin observes every LLM API call and accumulates token usage and estimated cost per session. Observation runs in both `observe` and `enforce` modes.
+When enabled, the plugin observes every LLM API call made through the normal conversational agent loop (see "Scope" above) and accumulates token usage and estimated cost per session. Observation runs in both `observe` and `enforce` modes.
 
 **What is captured per LLM call:**
 - `input_tokens`, `output_tokens`
@@ -241,7 +249,34 @@ The full result shape:
 
 **Approved-budget initialization:** on approval (auto or HITL), AHP sets `approved_budget_usd` on the session's `ExecutionContext` to the plan's own `projected_cost_usd` — never a recomputed value. The `ExecutionContext` is created if `on_session_start` hadn't already created one, since Phase 2B's `llm_execution_middleware` silently allows calls when no context is tracked; without this, an approved plan would never actually constrain anything. From that point on, every LLM call in the session is evaluated against this budget by the existing Phase 2B enforcement path — no additional wiring needed.
 
-**Not implemented here (Phase 3B, separate):** detecting a chat trigger like "Run my research topics.", loading a topics config file, calling a planning LLM, and the research execution itself. See `HERMES_RESEARCH_SAMPLE_INTEGRATION_ASSESSMENT.md` for how that would plug into this interface, and `examples/research_topics.yaml` / `examples/research_planning_prompt.md` for the reference config/prompt shapes a future implementation would use.
+Phase 3B (below) builds on this interface with a working sample: a skill that detects the chat trigger, loads a topics config file, builds the plan, and calls `amp_evaluate_research_plan`.
+
+## Research sample (Phase 3B)
+
+An end-to-end demo of everything above: a user sends a chat message, a skill loads their configured topics, proposes a plan, waits for AMP approval, researches only after approval, and reports back — with every LLM call along the way governed by Phase 2A/2B (see "Scope" above: this only works because the whole workflow runs as the model's own normal conversational turns, never via `ctx.llm`).
+
+**Quick start:**
+1. Install and enable the AMP Hermes plugin (see Install options below).
+2. Copy `examples/research_topics.yaml` to `~/.hermes/research_topics.yaml` and edit the topics (1-5 topics).
+3. Configure AMP credentials and an eval-policy for this agent (Steps 2-5 below).
+4. Copy or symlink `skills-pointer/amp-research/` into `~/.hermes/skills/research/amp-research/` (see "Pointer skill installation" below — this step is currently manual).
+5. Restart the Hermes gateway.
+6. Send `Run my research topics.` through a Hermes channel — or type `/amp-research` directly.
+7. Review any required approval in AMP (HITL happens only in AMP's UI; your Hermes channel only receives status notifications, never an approval prompt itself).
+8. Receive the completed report, with a real governance/usage summary, through Hermes.
+
+**Three registered tools** (`ctx.register_tool()`, wired in `register()`, not listed under `plugin.yaml`'s `hooks:` since tools are a separate registration API):
+- `amp_evaluate_research_plan({"plan": {...}})` — thin wrapper around `evaluate_proposed_plan()` above. Sources `session_id` from `gateway.session_context.get_session_env("HERMES_SESSION_ID", "")` (the same pattern the notification bridge already uses for platform/chat/thread) rather than trusting the model to supply one.
+- `amp_load_research_topics({"path": "..."})` — validates `~/.hermes/research_topics.yaml` (or an override path) via `research_config.load_research_topics()`: 1-5 topics required, defaults applied for `research_depth`/`sources_per_topic`/`lookback_days`. Exists so config loading is deterministic Python, not the model hand-parsing YAML.
+- `amp_governance_summary()` — returns the session's current `ExecutionContext.to_summary_dict()` (cost, tokens, call counts) so the skill's final report uses real numbers instead of inventing them. Returns `{"status": "no_context"}` if nothing has been tracked yet.
+
+**Two skills:**
+- `skills/research-agent/SKILL.md` — plugin-bundled (`ctx.register_skill()`), the actual step-by-step workflow. Plugin-bundled skills are **not** auto-listed in the system prompt's skill index (they're opt-in explicit loads only), so this alone isn't discoverable by natural language.
+- `skills-pointer/amp-research/SKILL.md` — a few lines, **not** plugin-bundled (must be installed to `~/.hermes/skills/`), so it *is* auto-indexed and matches natural-language requests like "Run my research topics." Its entire body is: call `skill_view(name="amp-governance:research-agent")` and follow it. Its `name: amp-research` frontmatter also gives it `/amp-research` automatically (Hermes' built-in per-skill slash command derivation, `agent/skill_commands.py`) — there is deliberately no separate `ctx.register_command()` for this. A plugin-registered command's return value is sent directly as the reply and cannot hand off to the model's multi-turn loop (verified against `gateway/run.py`), so it could not have driven this workflow anyway. Both entry points (typed `/amp-research` and natural language) resolve to the exact same skill — one implementation, not two.
+
+**Pointer skill installation (known Phase 4 UX friction):** the pointer skill currently requires a manual copy/symlink into `~/.hermes/skills/research/amp-research/`, same as this plugin's own manual install (Option A/B below). There's no existing Hermes API this cycle found for a plugin to auto-place a *non-bundled, auto-indexed* skill into the user-local skill tree — plugin-bundled skills are deliberately excluded from that index (see Phase 3A `evaluate_proposed_plan`'s doc above), which is exactly why this second, separately-installed file exists at all. Automating this is left for Phase 4.
+
+**Not implemented this cycle:** cron scheduling (see `hermes cron create ... --skills "amp-governance:research-agent"` in `HERMES_RESEARCH_SAMPLE_INTEGRATION_ASSESSMENT.md` §5 for the verified path once someone wants it), topic-management UI, plan revision loops, multiple report formats.
 
 ## Prerequisites
 
@@ -311,6 +346,9 @@ cp /path/to/amp-hermes-plugin/execution_context.py ~/.hermes/plugins/amp-governa
 cp /path/to/amp-hermes-plugin/notification.py ~/.hermes/plugins/amp-governance/
 cp /path/to/amp-hermes-plugin/policy.py ~/.hermes/plugins/amp-governance/
 cp /path/to/amp-hermes-plugin/session_store.py ~/.hermes/plugins/amp-governance/
+cp /path/to/amp-hermes-plugin/research_config.py ~/.hermes/plugins/amp-governance/
+cp -r /path/to/amp-hermes-plugin/skills ~/.hermes/plugins/amp-governance/
+cp -r /path/to/amp-hermes-plugin/examples ~/.hermes/plugins/amp-governance/
 ```
 
 ### Option B — symlink the repo
@@ -321,6 +359,8 @@ Use this when you are developing the plugin locally and want edits to take effec
 mkdir -p ~/.hermes/plugins
 ln -s /path/to/amp-hermes-plugin ~/.hermes/plugins/amp-governance
 ```
+
+Either option only installs the plugin itself — the `skills-pointer/amp-research/` skill is deliberately **not** included above, since it must live outside the plugin directory to be auto-discoverable. See "Research sample (Phase 3B)" above for that separate step.
 
 ## Step 1 — enable the plugin
 
@@ -550,6 +590,10 @@ For local dev, use the `feature/llm-execution-blocking` branch of the Hermes rep
 - `notification.py` — platform-neutral notification bridge
 - `policy.py` — Hermes tool normalization into AMP policy vocabulary
 - `session_store.py` — session-to-AMP instance tracking
+- `research_config.py` — research_topics.yaml loading/validation (Phase 3B)
+- `skills/research-agent/SKILL.md` — plugin-bundled research workflow (Phase 3B)
+- `skills-pointer/amp-research/SKILL.md` — small discoverable pointer skill; install separately to `~/.hermes/skills/` (Phase 3B)
+- `examples/research_topics.yaml`, `examples/research_planning_prompt.md` — template config and planning prompt read by the research-agent skill at runtime
 - `.env.example` — example environment variables for setup
 - `LICENSE` — MIT open-source license
 

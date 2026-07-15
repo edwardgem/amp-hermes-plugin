@@ -1,9 +1,10 @@
-# Phase 3B reference material — NOT read by AHP today.
-#
-# This is the config shape a future research-agent skill (Phase 3B) would read
-# to build a proposed execution plan and submit it to AHP's evaluate_proposed_plan()
-# (see __init__.py) for AMP governance approval. AHP itself never loads this file
-# or interprets its contents — the plan's `payload` field is opaque to AHP.
+# Template — copy this file to ~/.hermes/research_topics.yaml and edit the
+# topics list (1-5 topics). Loaded and validated at runtime by the
+# amp_load_research_topics tool (research_config.py), then read by
+# skills/research-agent/SKILL.md to build a proposed plan submitted to
+# AHP's evaluate_proposed_plan() for AMP governance approval. AHP's own
+# Python code never interprets the topics themselves — the plan's `payload`
+# field carrying them is opaque to AMP governance.
 
 topics:
   - AI agent governance
