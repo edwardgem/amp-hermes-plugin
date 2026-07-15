@@ -1,18 +1,33 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import json
 import logging
 import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from .amp_client import AmpClient, AmpClientError
 from .config import AmpConfig, load_config
+from .execution_context import ExecutionContext, ExecutionContextStore, LlmCallRecord
+from .notification import notify_user
 from .policy import NormalizedAction, normalize_tool_call
 from .session_store import SessionRecord, SessionStore
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Runtime capability detection for Phase 2B LLM enforcement.
+#
+# LLMExecutionBlocked is available only when Hermes includes the upstream
+# change from nousresearch/hermes-agent#64662. AHP detects this at import
+# time and registers the enforcement middleware only when the class is present.
+# ---------------------------------------------------------------------------
+try:
+    from hermes_cli.middleware import LLMExecutionBlocked as _LLMExecutionBlocked
+    _LLM_BLOCKED_AVAILABLE: bool = True
+except ImportError:
+    _LLMExecutionBlocked = None  # type: ignore[assignment,misc]
+    _LLM_BLOCKED_AVAILABLE = False
 
 
 def _truncate(value: str, limit: int = 220) -> str:
@@ -64,11 +79,100 @@ def _build_live_search_context(user_message: str) -> str:
     )
 
 
+def _calc_cost(
+    model: str,
+    provider: str,
+    base_url: str,
+    usage: dict,
+) -> tuple[float, str, str]:
+    """Estimate cost from a usage dict using Hermes' pricing table.
+
+    Returns (cost_usd, cost_status, cost_source).
+    Falls back to (0.0, "unknown", "") when pricing is unavailable.
+    """
+    try:
+        from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
+    except Exception:
+        return 0.0, "unknown", ""
+    try:
+        cu = CanonicalUsage(
+            input_tokens=int(usage.get("input_tokens") or 0),
+            output_tokens=int(usage.get("output_tokens") or 0),
+            cache_read_tokens=int(usage.get("cache_read_tokens") or 0),
+            cache_write_tokens=int(usage.get("cache_write_tokens") or 0),
+            reasoning_tokens=int(usage.get("reasoning_tokens") or 0),
+        )
+        result = estimate_usage_cost(model, cu, provider=provider or None, base_url=base_url or None)
+        cost = float(result.amount_usd or 0.0)
+        return cost, str(result.status), str(result.source)
+    except Exception:
+        return 0.0, "unknown", ""
+
+
+# ---------------------------------------------------------------------------
+# Cost status precedence (used by both Phase 2A accumulation and 2B projection)
+# ---------------------------------------------------------------------------
+
+_COST_STATUS_RANK: Dict[str, int] = {
+    "actual": 0,
+    "estimated": 1,
+    "included": 2,
+    "unknown": 3,
+}
+
+
+def _worst_cost_status(a: str, b: str) -> str:
+    """Return the cost status with the higher uncertainty rank."""
+    return a if _COST_STATUS_RANK.get(a, 3) >= _COST_STATUS_RANK.get(b, 3) else b
+
+
+def _estimate_pending_call_cost(
+    model: str,
+    provider: str,
+    base_url: str,
+    request: dict,
+) -> Tuple[float, str]:
+    """Conservatively estimate the cost of a pending LLM provider call.
+
+    Uses message character count (~4 chars/token) for input estimation and
+    1024 tokens as a default output estimate. This is intentionally conservative
+    (may over-estimate) to avoid under-estimating budget impact.
+
+    Returns (cost_usd, cost_status). Returns (0.0, "unknown") when the model
+    is not in Hermes' pricing table (e.g. local/Ollama models).
+    """
+    try:
+        from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
+    except Exception:
+        return 0.0, "unknown"
+    try:
+        messages = request.get("messages") or []
+        total_chars = sum(
+            len(str(m.get("content") or ""))
+            for m in messages
+            if isinstance(m, dict)
+        )
+        # Rough input estimate: 4 chars per token, minimum 100
+        estimated_input = max(total_chars // 4, 100)
+        # Output estimate: 1024 tokens as a conservative default
+        estimated_output = 1024
+        cu = CanonicalUsage(
+            input_tokens=estimated_input,
+            output_tokens=estimated_output,
+        )
+        result = estimate_usage_cost(model, cu, provider=provider or None, base_url=base_url or None)
+        cost = float(result.amount_usd or 0.0)
+        return cost, str(result.status)
+    except Exception:
+        return 0.0, "unknown"
+
+
 class AmpGovernancePlugin:
     def __init__(self) -> None:
         self._config: AmpConfig = load_config()
         self._client = AmpClient(self._config)
         self._store = SessionStore()
+        self._exec_contexts = ExecutionContextStore()
         self._warned_unconfigured = False
         self._blocked_turn_messages: Dict[str, str] = {}
         self._dispatch_tool = None
@@ -126,35 +230,289 @@ class AmpGovernancePlugin:
     def attach_context(self, ctx: Any) -> None:
         self._dispatch_tool = getattr(ctx, "dispatch_tool", None)
 
-    def _build_slack_target(self) -> str:
-        try:
-            from gateway.session_context import get_session_env
-        except Exception:
-            return ""
-        platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip().lower()
-        if platform != "slack":
-            return ""
-        chat_id = str(get_session_env("HERMES_SESSION_CHAT_ID", "") or "").strip()
-        if not chat_id:
-            return ""
-        thread_id = str(get_session_env("HERMES_SESSION_THREAD_ID", "") or "").strip()
-        return f"slack:{chat_id}:{thread_id}" if thread_id else f"slack:{chat_id}"
+    def _notify_user(self, message: str) -> None:
+        """Send a best-effort governance notification to the originating channel."""
+        notify_user(
+            self._dispatch_tool,
+            message,
+            notifications_enabled=self._config.notifications_enabled,
+        )
 
-    def _notify_slack(self, message: str) -> None:
-        if not callable(self._dispatch_tool):
-            return
-        target = self._build_slack_target()
-        if not target:
-            return
+    @staticmethod
+    def _format_cost_context(
+        current_cost: float,
+        current_status: str,
+        est_next: float,
+        est_next_status: str,
+        projected_total: float,
+        projected_status: str,
+    ) -> str:
+        """Format a concise cost summary for HITL pause notifications."""
+        unknown = "unknown"
+
+        def _fmt(cost: float, status: str) -> str:
+            if status == unknown:
+                return "unknown"
+            return f"${cost:.4f}"
+
+        lines = [
+            f"Current cost: {_fmt(current_cost, current_status)}",
+            f"Estimated next call: {_fmt(est_next, est_next_status)}",
+            f"Projected total after next call: {_fmt(projected_total, projected_status)}",
+        ]
+        return "\n".join(lines)
+
+    def _evaluate_llm_governance(
+        self,
+        exec_ctx: ExecutionContext,
+        model: str,
+        provider: str,
+        base_url: str,
+        session_id: str,
+        request: dict,
+        api_call_count: int,
+    ) -> Tuple[str, str]:
+        """Evaluate LLM governance policy before a provider call.
+
+        Returns (decision, reason) where decision is one of "allow" or "block".
+        Handles HITL polling internally, blocking the current thread until a
+        decision is received or the timeout expires.
+        """
+        from datetime import datetime, timezone
+
+        instance_id = exec_ctx.instance_id
+        exec_ctx.status = "policy_check"
+        exec_ctx.policy_eval_count += 1
+        exec_ctx.last_policy_eval_at = datetime.now(timezone.utc).isoformat()
+
+        # Cost snapshot for this evaluation
+        current_cost = exec_ctx.total_cost_usd
+        current_status = exec_ctx.cost_status
+
+        # Estimate pending call cost
+        est_next, est_next_status = _estimate_pending_call_cost(model, provider, base_url, request)
+
+        # Project total = accumulated + estimated next call
+        projected_total = current_cost + est_next
+        projected_status = _worst_cost_status(current_status, est_next_status)
+
+        self._safe_log(
+            instance_id,
+            f"Pre-LLM policy eval | execution_id={exec_ctx.execution_id} | "
+            f"model={model} | llm_call=#{api_call_count} | "
+            f"current_cost=${current_cost:.6f} ({current_status}) | "
+            f"est_next=${est_next:.6f} ({est_next_status}) | "
+            f"projected=${projected_total:.6f} ({projected_status})",
+        )
+
         try:
-            raw = self._dispatch_tool("send_message", {"target": target, "message": f"[AMP]\n{message}"})
-            if not raw:
-                return
-            payload = json.loads(raw) if isinstance(raw, str) else raw
-            if isinstance(payload, dict) and payload.get("error"):
-                logger.warning("amp-governance slack notify failed: %s", payload["error"])
+            response = self._client.request_llm_hitl(
+                instance_id,
+                execution_id=exec_ctx.execution_id,
+                model=model,
+                provider=provider,
+                session_id=session_id,
+                current_cost_usd=current_cost,
+                current_cost_status=current_status,
+                approved_budget_usd=exec_ctx.approved_budget_usd,
+                estimated_next_call_cost_usd=est_next,
+                estimated_next_call_cost_status=est_next_status,
+                projected_total_cost_usd=projected_total,
+                projected_total_cost_status=projected_status,
+                input_tokens_total=exec_ctx.input_tokens,
+                output_tokens_total=exec_ctx.output_tokens,
+                cache_read_tokens_total=exec_ctx.cache_read_tokens,
+                cache_write_tokens_total=exec_ctx.cache_write_tokens,
+                reasoning_tokens_total=exec_ctx.reasoning_tokens,
+                total_tokens=exec_ctx.total_tokens,
+                llm_calls_total=exec_ctx.llm_calls,
+            )
         except Exception as exc:
-            logger.warning("amp-governance slack notify failed: %s", exc)
+            self._safe_log(
+                instance_id,
+                f"AMP unavailable for LLM policy check: {exc}",
+                level="WARN",
+            )
+            exec_ctx.status = "running"
+            if self._config.llm_governance_fail_closed:
+                self._safe_log(
+                    instance_id,
+                    "Fail-closed: blocking LLM call due to AMP unavailability",
+                )
+                exec_ctx.llm_blocked += 1
+                exec_ctx.status = "blocked"
+                return "block", "AMP governance unavailable; LLM call blocked (fail-closed)."
+            self._safe_log(
+                instance_id,
+                "Fail-open: allowing LLM call despite AMP unavailability",
+            )
+            return "allow", ""
+
+        status = str(response.get("status") or "").strip().lower()
+        reason = str(response.get("reason") or response.get("information") or "").strip()
+        exec_ctx.last_policy_result = status
+
+        self._safe_log(
+            instance_id,
+            f"LLM policy decision | status={status or 'unknown'}"
+            + (f" | {reason}" if reason else ""),
+        )
+
+        if status == "no_policy":
+            exec_ctx.llm_blocked += 1
+            exec_ctx.status = "blocked"
+            return "block", f'No active AMP governance policy for agent "{self._config.agent_name}".'
+
+        if status in {"no-hitl", "allow", "allowed", "approved"}:
+            exec_ctx.status = "running"
+            self._safe_log(
+                instance_id,
+                f"LLM call allowed | execution_id={exec_ctx.execution_id} | call=#{api_call_count}",
+            )
+            return "allow", ""
+
+        if status in {"pending", "waiting-for-response"} or response.get("workitem_id"):
+            workitem_id = str(response.get("workitem_id") or "").strip()
+            exec_ctx.hitl_workitem_id = workitem_id
+            exec_ctx.status = "hitl_pending"
+            cost_ctx = self._format_cost_context(
+                current_cost, current_status,
+                est_next, est_next_status,
+                projected_total, projected_status,
+            )
+            self._notify_user(
+                f"Execution paused pending approval in AMP.\n{cost_ctx}"
+            )
+            self._safe_log(
+                instance_id,
+                f"LLM HITL requested | workitem_id={workitem_id} | waiting_for={self._config.username}",
+                level="WARN",
+            )
+            deadline = time.time() + (self._config.hitl_timeout_minutes * 60)
+            while time.time() < deadline:
+                time.sleep(max(self._config.hitl_poll_interval_seconds, 1))
+                try:
+                    decision = self._client.get_hitl_decision(instance_id)
+                except AmpClientError as exc:
+                    logger.warning("amp-governance LLM decision poll failed: %s", exc)
+                    continue
+                if str(decision.get("status") or "").strip().lower() != "complete":
+                    continue
+                resolution = str(decision.get("resolution") or "").strip().lower()
+                info = str(decision.get("information") or "").strip()
+                self._safe_log(
+                    instance_id,
+                    f"LLM HITL resolution | resolution={resolution}"
+                    + (f" | {info}" if info else ""),
+                    level="WARN" if resolution not in {"approve", "approved", "modify", "modified"} else "INFO",
+                )
+                if resolution in {"approve", "approved", "modify", "modified"}:
+                    exec_ctx.llm_hitl_approved += 1
+                    exec_ctx.status = "resuming"
+                    self._notify_user(
+                        "Approval received. Resuming LLM execution."
+                        + (f"\n{info}" if info else "")
+                    )
+                    self._safe_log(
+                        instance_id,
+                        f"LLM HITL approved | execution_id={exec_ctx.execution_id} | call=#{api_call_count}",
+                    )
+                    return "allow", ""
+                exec_ctx.llm_blocked += 1
+                exec_ctx.status = "blocked"
+                self._notify_user(
+                    f"AMP reviewer rejected LLM execution."
+                    + (f" {info}" if info else "")
+                )
+                self._safe_log(
+                    instance_id,
+                    f"LLM HITL rejected | execution_id={exec_ctx.execution_id} | call=#{api_call_count}"
+                    + (f" | {info}" if info else ""),
+                    level="WARN",
+                )
+                return "block", f"LLM execution rejected by AMP HITL review.{' ' + info if info else ''}"
+            # Timeout
+            exec_ctx.llm_blocked += 1
+            exec_ctx.status = "blocked"
+            self._notify_user("AMP review timed out. LLM execution was blocked.")
+            self._safe_log(
+                instance_id,
+                f"LLM HITL timed out | execution_id={exec_ctx.execution_id} | call=#{api_call_count}",
+                level="WARN",
+            )
+            return "block", "LLM execution timed out waiting for AMP HITL approval."
+
+        # Unexpected status
+        if self._config.llm_governance_fail_closed:
+            exec_ctx.llm_blocked += 1
+            exec_ctx.status = "blocked"
+            self._safe_log(
+                instance_id,
+                f"LLM unexpected AMP status '{status}'; fail-closed → block",
+                level="WARN",
+            )
+            return "block", f'AMP returned unexpected status "{status or "unknown"}"; LLM call blocked (fail-closed).'
+        exec_ctx.status = "running"
+        self._safe_log(
+            instance_id,
+            f"LLM unexpected AMP status '{status}'; fail-open → allow",
+            level="WARN",
+        )
+        return "allow", ""
+
+    def llm_execution_middleware(
+        self,
+        request: dict,
+        next_call: Any,
+        session_id: str = "",
+        model: str = "",
+        provider: str = "",
+        base_url: str = "",
+        api_call_count: int = 0,
+        **_: Any,
+    ) -> Any:
+        """llm_execution middleware: evaluate LLM governance before every provider call.
+
+        Only active when AMP_LLM_GOVERNANCE_ENABLED=true and
+        AMP_LLM_GOVERNANCE_MODE=enforce, and when the installed Hermes version
+        provides LLMExecutionBlocked (nousresearch/hermes-agent#64662).
+        """
+        if (
+            not self._config.llm_governance_enabled
+            or self._config.llm_governance_mode != "enforce"
+        ):
+            return next_call(request)
+
+        exec_ctx = self._exec_contexts.get(session_id)
+        if exec_ctx is None:
+            # Session context not tracked (session_start failed or governance disabled at start)
+            return next_call(request)
+
+        decision, reason = self._evaluate_llm_governance(
+            exec_ctx, model, provider, base_url, session_id, request, api_call_count
+        )
+
+        if decision == "block":
+            if _LLMExecutionBlocked is None:
+                # Should not happen — middleware is only registered when available
+                logger.error(
+                    "amp-governance: LLMExecutionBlocked is unavailable but enforcement "
+                    "was triggered. Allowing call to avoid crash. Check plugin registration."
+                )
+                return next_call(request)
+            raise _LLMExecutionBlocked(
+                reason,
+                metadata={
+                    "execution_id": exec_ctx.execution_id,
+                    "current_cost_usd": exec_ctx.total_cost_usd,
+                    "cost_status": exec_ctx.cost_status,
+                    "policy_result": exec_ctx.last_policy_result or "unknown",
+                    "session_id": session_id,
+                },
+            )
+
+        exec_ctx.status = "running"
+        return next_call(request)
 
     def _evaluate_governance(
         self,
@@ -196,7 +554,7 @@ class AmpGovernancePlugin:
                 f"HITL requested | raw_tool={action.raw_tool_name} | waiting_for={self._config.username}",
                 level="WARN",
             )
-            self._notify_slack(
+            self._notify_user(
                 f'AMP is waiting for a human reviewer to approve "{action.raw_tool_name}" before continuing. '
                 "This action is paused pending review."
             )
@@ -222,15 +580,15 @@ class AmpGovernancePlugin:
                         if resolution in {"modify", "modified"}
                         else f'AMP review approved "{action.raw_tool_name}". Continuing now.'
                     )
-                    self._notify_slack(approval_message)
+                    self._notify_user(approval_message)
                     return None
-                self._notify_slack(
+                self._notify_user(
                     f'AMP reviewer rejected "{action.raw_tool_name}".{f" {info}" if info else ""}'
                 )
                 return self._block_message(
                     f'{action.raw_tool_name} was rejected by AMP HITL review.{f" {info}" if info else ""}'
                 )
-            self._notify_slack(
+            self._notify_user(
                 f'AMP review timed out for "{action.raw_tool_name}". The action was blocked.'
             )
             return self._block_message(
@@ -250,7 +608,33 @@ class AmpGovernancePlugin:
             self._warn_unconfigured()
             return
         try:
-            self._ensure_instance(session_id, model=model, platform=platform)
+            instance_id = self._ensure_instance(session_id, model=model, platform=platform)
+            if self._config.llm_governance_enabled:
+                self._exec_contexts.create(
+                    session_id,
+                    instance_id,
+                    model=model,
+                    platform=platform,
+                )
+                # Warn once per session when enforcement is configured but unavailable
+                if (
+                    self._config.llm_governance_mode == "enforce"
+                    and not _LLM_BLOCKED_AVAILABLE
+                ):
+                    logger.error(
+                        "amp-governance: AMP_LLM_GOVERNANCE_MODE=enforce is set but the "
+                        "installed Hermes does not provide LLMExecutionBlocked "
+                        "(nousresearch/hermes-agent#64662). Enforcement is unavailable — "
+                        "LLM calls will proceed without enforcement. "
+                        "Set AMP_LLM_GOVERNANCE_MODE=observe to suppress this error, "
+                        "or upgrade Hermes to a version that includes the upstream fix."
+                    )
+                    self._notify_user(
+                        "AMP LLM enforcement is configured but cannot be activated: "
+                        "the installed Hermes version does not support LLMExecutionBlocked "
+                        "(see nousresearch/hermes-agent#64662). "
+                        "LLM calls will proceed without enforcement."
+                    )
         except Exception as exc:
             logger.warning("amp-governance session init failed: %s", exc)
 
@@ -258,6 +642,19 @@ class AmpGovernancePlugin:
         if not session_id:
             return
         self._blocked_turn_messages.pop(session_id, None)
+
+        # Log execution summary before closing the session
+        if self._config.llm_governance_enabled:
+            exec_ctx = self._exec_contexts.remove(session_id)
+            if exec_ctx is not None:
+                exec_ctx.status = "finished"
+                record = self._store.get(session_id)
+                instance_id = record.instance_id if record else exec_ctx.instance_id
+                try:
+                    self._client.log_execution_summary(instance_id, exec_ctx.to_summary_dict())
+                except Exception as exc:
+                    logger.warning("amp-governance execution summary log failed: %s", exc)
+
         record = self._store.get(session_id)
         if not record:
             return
@@ -338,6 +735,11 @@ class AmpGovernancePlugin:
             return
         if not self._config.is_configured:
             return
+        # Count this governed tool call in the execution context
+        if self._config.llm_governance_enabled:
+            exec_ctx = self._exec_contexts.get(session_id)
+            if exec_ctx is not None:
+                exec_ctx.tool_calls += 1
         record = self._store.get(session_id)
         if not record:
             return
@@ -353,6 +755,74 @@ class AmpGovernancePlugin:
             summary,
             level="ERROR" if (status or "").lower() in {"error", "blocked"} else "INFO",
         )
+
+    def post_api_request(
+        self,
+        session_id: str = "",
+        api_request_id: str = "",
+        model: str = "",
+        provider: str = "",
+        base_url: str = "",
+        api_call_count: int = 0,
+        api_duration: float = 0.0,
+        usage: Optional[Dict] = None,
+        **_: Any,
+    ) -> None:
+        """
+        Observer hook fired after every LLM API call with normalized usage data.
+
+        Accumulates token and cost metrics into the session's ExecutionContext,
+        then logs the event to AMP. Enabled only when AMP_LLM_GOVERNANCE_ENABLED=true.
+        Does not block or modify LLM calls.
+        """
+        if not self._config.llm_governance_enabled:
+            return
+        if not session_id or not self._config.is_configured:
+            return
+        exec_ctx = self._exec_contexts.get(session_id)
+        if exec_ctx is None:
+            return
+
+        # Extract token counts (usage may be None for providers that don't report)
+        u = usage or {}
+        input_tokens = int(u.get("input_tokens") or 0)
+        output_tokens = int(u.get("output_tokens") or 0)
+        cache_read = int(u.get("cache_read_tokens") or 0)
+        cache_write = int(u.get("cache_write_tokens") or 0)
+        reasoning = int(u.get("reasoning_tokens") or 0)
+
+        # Calculate cost (best-effort; unknown if pricing table lacks this model)
+        if usage:
+            cost_usd, cost_status, cost_source = _calc_cost(model, provider, base_url, u)
+        else:
+            cost_usd, cost_status, cost_source = 0.0, "unknown", ""
+
+        record = LlmCallRecord(
+            api_request_id=api_request_id or "",
+            api_call_number=api_call_count,
+            model=model or exec_ctx.model,
+            provider=provider or "",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
+            reasoning_tokens=reasoning,
+            cost_usd=cost_usd,
+            cost_status=cost_status,
+            cost_source=cost_source,
+            api_duration=api_duration,
+        )
+        exec_ctx.accumulate(record)
+
+        # Log to AMP (best-effort, non-blocking)
+        try:
+            self._client.log_llm_event(
+                exec_ctx.instance_id,
+                record.to_dict(),
+                execution_id=exec_ctx.execution_id,
+            )
+        except Exception as exc:
+            logger.warning("amp-governance llm event log failed: %s", exc)
 
     def transform_llm_output(
         self,
@@ -376,4 +846,26 @@ def register(ctx) -> None:
     ctx.register_hook("pre_llm_call", _PLUGIN.pre_llm_call)
     ctx.register_hook("pre_tool_call", _PLUGIN.pre_tool_call)
     ctx.register_hook("post_tool_call", _PLUGIN.post_tool_call)
+    ctx.register_hook("post_api_request", _PLUGIN.post_api_request)
     ctx.register_hook("transform_llm_output", _PLUGIN.transform_llm_output)
+
+    # Phase 2B: register llm_execution middleware only when both enforcement is
+    # enabled and the required Hermes capability (LLMExecutionBlocked) is present.
+    if (
+        _PLUGIN._config.llm_governance_enabled
+        and _PLUGIN._config.llm_governance_mode == "enforce"
+    ):
+        if _LLM_BLOCKED_AVAILABLE:
+            ctx.register_middleware("llm_execution", _PLUGIN.llm_execution_middleware)
+            logger.info(
+                "amp-governance: LLM enforcement enabled (AMP_LLM_GOVERNANCE_MODE=enforce); "
+                "llm_execution middleware registered."
+            )
+        else:
+            logger.error(
+                "amp-governance: AMP_LLM_GOVERNANCE_MODE=enforce is configured but "
+                "LLMExecutionBlocked is not available in the installed Hermes "
+                "(nousresearch/hermes-agent#64662). "
+                "Enforcement middleware was NOT registered. "
+                "LLM calls will proceed without enforcement."
+            )

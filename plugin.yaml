@@ -1,6 +1,6 @@
 name: amp-governance
-version: "0.1.0"
-description: "AMP governance plugin for Hermes. Normalizes selected Hermes tools into AMP eval-policy actions, logs activity, and enforces allow/block/HITL decisions before execution."
+version: "0.3.0"
+description: "AMP governance plugin for Hermes. Normalizes selected Hermes tools into AMP eval-policy actions, logs activity, enforces allow/block/HITL decisions before execution, observes LLM token and cost usage per session, enforces pre-LLM resource governance when enabled, and sends governance notifications back to the originating channel."
 author: "Inquiryon"
 hooks:
   - on_session_start
@@ -8,3 +8,8 @@ hooks:
   - pre_llm_call
   - pre_tool_call
   - post_tool_call
+  - post_api_request
+  - transform_llm_output
+# Note: the llm_execution middleware is registered at runtime (not listed here)
+# when AMP_LLM_GOVERNANCE_ENABLED=true, AMP_LLM_GOVERNANCE_MODE=enforce, and
+# the installed Hermes provides LLMExecutionBlocked (hermes-agent#64662).
