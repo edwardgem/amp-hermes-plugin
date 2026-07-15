@@ -45,7 +45,104 @@ class LoadConfigTests(unittest.TestCase):
         self.assertEqual(cfg.hitl_poll_interval_seconds, 5)
         self.assertFalse(cfg.fail_closed)
 
+    def test_new_config_defaults_when_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes_home = Path(tmp)
+            (hermes_home / ".env").write_text(
+                "\n".join(
+                    [
+                        "AMP_BACKEND_URL=https://amp.example.com",
+                        "AMP_API_KEY=amp_k_test",
+                        "AMP_ORG_ID=O-0001",
+                        "AMP_USERNAME=tester@example.com",
+                        "AMP_AGENT_NAME=hermes-test",
+                    ]
+                )
+                + "\n"
+            )
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}, clear=False):
+                cfg = load_config()
+
+        # Notification bridge: enabled by default
+        self.assertTrue(cfg.notifications_enabled)
+        # LLM governance: disabled by default
+        self.assertFalse(cfg.llm_governance_enabled)
+        self.assertEqual(cfg.llm_governance_mode, "observe")
+        self.assertFalse(cfg.llm_governance_fail_closed)
+        self.assertTrue(cfg.llm_governance_include_subagents)
+
+    def test_new_config_reads_explicit_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes_home = Path(tmp)
+            (hermes_home / ".env").write_text(
+                "\n".join(
+                    [
+                        "AMP_BACKEND_URL=https://amp.example.com",
+                        "AMP_API_KEY=amp_k_test",
+                        "AMP_ORG_ID=O-0001",
+                        "AMP_USERNAME=tester@example.com",
+                        "AMP_AGENT_NAME=hermes-test",
+                        "AMP_NOTIFICATIONS_ENABLED=false",
+                        "AMP_LLM_GOVERNANCE_ENABLED=true",
+                        "AMP_LLM_GOVERNANCE_MODE=enforce",
+                        "AMP_LLM_GOVERNANCE_FAIL_CLOSED=true",
+                        "AMP_LLM_GOVERNANCE_INCLUDE_SUBAGENTS=false",
+                    ]
+                )
+                + "\n"
+            )
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}, clear=False):
+                cfg = load_config()
+
+        self.assertFalse(cfg.notifications_enabled)
+        self.assertTrue(cfg.llm_governance_enabled)
+        self.assertEqual(cfg.llm_governance_mode, "enforce")
+        self.assertTrue(cfg.llm_governance_fail_closed)
+        self.assertFalse(cfg.llm_governance_include_subagents)
+
+    def test_invalid_llm_governance_mode_falls_back_to_observe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes_home = Path(tmp)
+            (hermes_home / ".env").write_text(
+                "\n".join(
+                    [
+                        "AMP_BACKEND_URL=https://amp.example.com",
+                        "AMP_API_KEY=amp_k_test",
+                        "AMP_ORG_ID=O-0001",
+                        "AMP_USERNAME=tester@example.com",
+                        "AMP_AGENT_NAME=hermes-test",
+                        "AMP_LLM_GOVERNANCE_MODE=invalid-value",
+                    ]
+                )
+                + "\n"
+            )
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}, clear=False):
+                cfg = load_config()
+
+        self.assertEqual(cfg.llm_governance_mode, "observe")
+
+    def test_notifications_enabled_true_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes_home = Path(tmp)
+            (hermes_home / ".env").write_text(
+                "AMP_BACKEND_URL=https://amp.example.com\n"
+                "AMP_API_KEY=k\nAMP_ORG_ID=O\nAMP_USERNAME=u\nAMP_AGENT_NAME=a\n"
+            )
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}, clear=False):
+                cfg = load_config()
+        self.assertTrue(cfg.notifications_enabled)
+
+    def test_llm_governance_disabled_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes_home = Path(tmp)
+            (hermes_home / ".env").write_text(
+                "AMP_BACKEND_URL=https://amp.example.com\n"
+                "AMP_API_KEY=k\nAMP_ORG_ID=O\nAMP_USERNAME=u\nAMP_AGENT_NAME=a\n"
+            )
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}, clear=False):
+                cfg = load_config()
+        self.assertFalse(cfg.llm_governance_enabled)
+
 
 if __name__ == "__main__":
     unittest.main()
-
