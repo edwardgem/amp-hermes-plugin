@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 import logging
+from pathlib import Path
 import re
 import time
 import uuid
@@ -12,6 +14,7 @@ from .config import AmpConfig, load_config
 from .execution_context import ExecutionContext, ExecutionContextStore, LlmCallRecord
 from .notification import notify_user
 from .policy import NormalizedAction, normalize_tool_call
+from .research_config import load_research_topics
 from .session_store import SessionRecord, SessionStore
 
 logger = logging.getLogger(__name__)
@@ -472,7 +475,14 @@ class AmpGovernancePlugin:
         api_call_count: int = 0,
         **_: Any,
     ) -> Any:
-        """llm_execution middleware: evaluate LLM governance before every provider call.
+        """llm_execution middleware: evaluate LLM governance before every provider
+        call made through Hermes' normal conversational agent loop (the
+        run_llm_execution_middleware() call site in agent/conversation_loop.py).
+
+        This does NOT cover LLM calls a plugin makes via ctx.llm.complete() /
+        complete_structured() — that facade calls agent/auxiliary_client.py::
+        call_llm() directly and never reaches this middleware or pre_api_request/
+        post_api_request. See README.md "Scope: what Phase 2A/2B actually covers".
 
         Only active when AMP_LLM_GOVERNANCE_ENABLED=true and
         AMP_LLM_GOVERNANCE_MODE=enforce, and when the installed Hermes version
@@ -948,7 +958,10 @@ class AmpGovernancePlugin:
         **_: Any,
     ) -> None:
         """
-        Observer hook fired after every LLM API call with normalized usage data.
+        Observer hook fired after every LLM API call made through Hermes' normal
+        conversational agent loop, with normalized usage data. Plugin LLM calls
+        via ctx.llm.complete()/complete_structured() do not fire this hook —
+        see README.md "Scope: what Phase 2A/2B actually covers".
 
         Accumulates token and cost metrics into the session's ExecutionContext,
         then logs the event to AMP. Enabled only when AMP_LLM_GOVERNANCE_ENABLED=true.
@@ -1027,6 +1040,128 @@ def evaluate_proposed_plan(session_id: str, plan: Dict[str, Any]) -> Dict[str, A
     return _PLUGIN.evaluate_proposed_plan(session_id, plan)
 
 
+# ---------------------------------------------------------------------------
+# Phase 3B: registered tools for the research-agent skill.
+#
+# These run as normal tool calls inside the model's own conversational turn —
+# deliberately not via ctx.llm, which calls agent/auxiliary_client.py::call_llm()
+# and does not fire pre_api_request/post_api_request/llm_execution, so anything
+# routed through it would be invisible to Phase 2A/2B governance. Keeping the
+# research skill entirely inside normal turns/tool-calls is what makes "AHP
+# Phase 2B governs every LLM invocation" actually true for this sample.
+# ---------------------------------------------------------------------------
+
+def _current_session_id() -> str:
+    """Best-effort current-turn session_id, same pattern as notification.py's
+    build_notification_target() — a plain function import failure (no gateway
+    context, e.g. CLI/test) degrades to an empty string rather than raising."""
+    try:
+        from gateway.session_context import get_session_env
+    except Exception:
+        return ""
+    return str(get_session_env("HERMES_SESSION_ID", "") or "").strip()
+
+
+_EVALUATE_RESEARCH_PLAN_SCHEMA = {
+    "name": "amp_evaluate_research_plan",
+    "description": (
+        "Submit a proposed research execution plan to AMP for governance approval "
+        "before starting any research. Blocks until a decision is reached (which may "
+        "involve a human reviewer in AMP) and returns the structured decision. Do not "
+        "begin researching any topic until this returns status=\"approved\"."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "plan": {
+                "type": "object",
+                "description": "The proposed execution plan.",
+                "properties": {
+                    "plan_type": {"type": "string", "description": 'Always "research" for this workflow.'},
+                    "summary": {"type": "string"},
+                    "projected_cost_usd": {"type": "number"},
+                    "projected_cost_status": {"type": "string"},
+                    "estimated_llm_calls": {"type": "integer"},
+                    "estimated_tool_calls": {"type": "integer"},
+                    "estimated_duration_minutes": {"type": "integer"},
+                    "work_units_total": {"type": "integer"},
+                    "payload": {
+                        "type": "object",
+                        "description": (
+                            "Opaque caller data (e.g. topics, research_depth). "
+                            "Not interpreted by AMP governance."
+                        ),
+                    },
+                },
+                "required": ["plan_type", "projected_cost_usd"],
+            },
+        },
+        "required": ["plan"],
+    },
+}
+
+_LOAD_RESEARCH_TOPICS_SCHEMA = {
+    "name": "amp_load_research_topics",
+    "description": "Load and validate the local research topics configuration file (1-5 topics).",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Optional path override. Defaults to ~/.hermes/research_topics.yaml.",
+            },
+        },
+        "required": [],
+    },
+}
+
+_GOVERNANCE_SUMMARY_SCHEMA = {
+    "name": "amp_governance_summary",
+    "description": (
+        "Return the current session's accumulated AMP governance totals (cost, token, "
+        "and call counts) for reporting. Takes no arguments."
+    ),
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+_DEFAULT_RESEARCH_TOPICS_PATH = str(Path.home() / ".hermes" / "research_topics.yaml")
+
+
+def _tool_amp_evaluate_research_plan(args: dict, **_: Any) -> str:
+    plan = (args or {}).get("plan")
+    if not isinstance(plan, dict):
+        return json.dumps({
+            "status": "error", "plan_id": None, "approved_budget_usd": None,
+            "reason": "plan must be an object", "workitem_id": None,
+        })
+    result = _PLUGIN.evaluate_proposed_plan(_current_session_id(), plan)
+    return json.dumps(result)
+
+
+def _tool_amp_load_research_topics(args: dict, **_: Any) -> str:
+    path = (args or {}).get("path") or _DEFAULT_RESEARCH_TOPICS_PATH
+    try:
+        topics = load_research_topics(path)
+    except ValueError as exc:
+        return json.dumps({"status": "error", "reason": str(exc)})
+    return json.dumps({"status": "ok", **topics})
+
+
+def _tool_amp_governance_summary(args: dict, **_: Any) -> str:
+    """Returns ExecutionContext.to_summary_dict() as-is (it already carries its
+    own 'status' field describing execution state, e.g. "running"). The only
+    sentinel this adds is status="no_context", which never collides with a
+    real execution status, for when nothing has been tracked yet."""
+    session_id = _current_session_id()
+    exec_ctx = _PLUGIN._exec_contexts.get(session_id) if session_id else None
+    if exec_ctx is None:
+        return json.dumps({
+            "status": "no_context",
+            "reason": "No active AMP execution context for this session yet.",
+        })
+    return json.dumps(exec_ctx.to_summary_dict())
+
+
 def register(ctx) -> None:
     _PLUGIN.attach_context(ctx)
     ctx.register_hook("on_session_start", _PLUGIN.on_session_start)
@@ -1036,6 +1171,42 @@ def register(ctx) -> None:
     ctx.register_hook("post_tool_call", _PLUGIN.post_tool_call)
     ctx.register_hook("post_api_request", _PLUGIN.post_api_request)
     ctx.register_hook("transform_llm_output", _PLUGIN.transform_llm_output)
+
+    # Phase 3B: tools + plugin-bundled skill for the research-agent sample.
+    # These are ordinary registered tools dispatched inside the model's own
+    # conversational turn — see the comment above _current_session_id() for why.
+    ctx.register_tool(
+        name="amp_evaluate_research_plan",
+        toolset="amp_governance",
+        schema=_EVALUATE_RESEARCH_PLAN_SCHEMA,
+        handler=_tool_amp_evaluate_research_plan,
+        description=_EVALUATE_RESEARCH_PLAN_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name="amp_load_research_topics",
+        toolset="amp_governance",
+        schema=_LOAD_RESEARCH_TOPICS_SCHEMA,
+        handler=_tool_amp_load_research_topics,
+        description=_LOAD_RESEARCH_TOPICS_SCHEMA["description"],
+    )
+    ctx.register_tool(
+        name="amp_governance_summary",
+        toolset="amp_governance",
+        schema=_GOVERNANCE_SUMMARY_SCHEMA,
+        handler=_tool_amp_governance_summary,
+        description=_GOVERNANCE_SUMMARY_SCHEMA["description"],
+    )
+    try:
+        ctx.register_skill(
+            "research-agent",
+            Path(__file__).parent / "skills" / "research-agent" / "SKILL.md",
+            description=(
+                "Governed research workflow: reads configured topics, gets an "
+                "AMP-approved plan, researches, and reports."
+            ),
+        )
+    except Exception as exc:
+        logger.warning("amp-governance: research-agent skill registration failed: %s", exc)
 
     # Phase 2B: register llm_execution middleware only when both enforcement is
     # enabled and the required Hermes capability (LLMExecutionBlocked) is present.

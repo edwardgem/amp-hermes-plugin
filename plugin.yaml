@@ -1,6 +1,6 @@
 name: amp-governance
-version: "0.3.0"
-description: "AMP governance plugin for Hermes. Normalizes selected Hermes tools into AMP eval-policy actions, logs activity, enforces allow/block/HITL decisions before execution, observes LLM token and cost usage per session, enforces pre-LLM resource governance when enabled, and sends governance notifications back to the originating channel."
+version: "0.4.0"
+description: "AMP governance plugin for Hermes. Normalizes selected Hermes tools into AMP eval-policy actions, logs activity, enforces allow/block/HITL decisions before execution, observes LLM token and cost usage per session, enforces pre-LLM resource governance when enabled, sends governance notifications back to the originating channel, and provides a proposed-plan approval interface plus a sample governed research-agent skill and tools."
 author: "Inquiryon"
 hooks:
   - on_session_start
@@ -13,3 +13,10 @@ hooks:
 # Note: the llm_execution middleware is registered at runtime (not listed here)
 # when AMP_LLM_GOVERNANCE_ENABLED=true, AMP_LLM_GOVERNANCE_MODE=enforce, and
 # the installed Hermes provides LLMExecutionBlocked (hermes-agent#64662).
+#
+# Phase 3B also registers three tools (amp_evaluate_research_plan,
+# amp_load_research_topics, amp_governance_summary) and one bundled skill
+# (research-agent) at runtime via register(ctx) — not listed under hooks:
+# above since ctx.register_tool()/register_skill() are a separate API from
+# the hooks system. See README.md "Plan approval" and "Research sample"
+# sections.
