@@ -130,6 +130,8 @@ class CapabilityDetectionTests(unittest.TestCase):
             dispatch_tool=Mock(),
             register_hook=Mock(),
             register_middleware=Mock(),
+            register_tool=Mock(),
+            register_skill=Mock(),
         )
 
         with patch.object(mod, "_LLM_BLOCKED_AVAILABLE", False), \
