@@ -49,6 +49,20 @@ class NormalizeToolCallTests(unittest.TestCase):
         self.assertEqual(action.action, "edit")
         self.assertEqual(action.context["file_path"], "/tmp/b.txt")
 
+    def test_web_extract_maps_to_exec(self) -> None:
+        action = normalize_tool_call("web_extract", {"urls": ["https://example.com/a", "https://example.com/b"]})
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.tool, "exec")
+        self.assertEqual(action.action, "web_extract")
+        self.assertEqual(action.context["urls"], ["https://example.com/a", "https://example.com/b"])
+
+    def test_web_extract_with_non_list_urls_defaults_to_empty(self) -> None:
+        action = normalize_tool_call("web_extract", {"urls": "not-a-list"})
+        self.assertIsNotNone(action)
+        assert action is not None
+        self.assertEqual(action.context["urls"], [])
+
     def test_unsupported_tool_is_ignored(self) -> None:
         self.assertIsNone(normalize_tool_call("browser_navigate", {"url": "https://example.com"}))
 
