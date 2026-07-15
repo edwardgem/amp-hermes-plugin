@@ -1,0 +1,15 @@
+# Phase 3B reference material — NOT read by AHP today.
+#
+# This is the config shape a future research-agent skill (Phase 3B) would read
+# to build a proposed execution plan and submit it to AHP's evaluate_proposed_plan()
+# (see __init__.py) for AMP governance approval. AHP itself never loads this file
+# or interprets its contents — the plan's `payload` field is opaque to AHP.
+
+topics:
+  - AI agent governance
+  - Progressive autonomy
+  - Human-in-the-loop systems
+
+research_depth: standard
+sources_per_topic: 5
+lookback_days: 7
