@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import logging
 import re
 import time
+import uuid
 from typing import Any, Dict, Optional, Tuple
 
 from .amp_client import AmpClient, AmpClientError
@@ -601,6 +602,184 @@ class AmpGovernancePlugin:
             )
         return None
 
+    @staticmethod
+    def _plan_result(
+        status: str,
+        *,
+        plan_id: Optional[str] = None,
+        approved_budget_usd: Optional[float] = None,
+        reason: str = "",
+        workitem_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "status": status,
+            "plan_id": plan_id,
+            "approved_budget_usd": approved_budget_usd,
+            "reason": reason,
+            "workitem_id": workitem_id,
+        }
+
+    def _apply_approved_budget(self, session_id: str, instance_id: str, approved_budget_usd: float) -> None:
+        """Initialize the session's runtime budget from an approved plan.
+
+        Creates the ExecutionContext if on_session_start hadn't already (Phase 2B's
+        llm_execution_middleware silently no-ops without one), so an approved plan
+        always results in an enforceable budget.
+        """
+        exec_ctx = self._exec_contexts.get(session_id)
+        if exec_ctx is None:
+            exec_ctx = self._exec_contexts.create(session_id, instance_id)
+        exec_ctx.approved_budget_usd = approved_budget_usd
+
+    def evaluate_proposed_plan(self, session_id: str, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """Submit a proposed execution plan to AMP for governance approval (Phase 3A).
+
+        This is the public plan-governance interface: it accepts a plan dict,
+        normalizes it into AMP policy signals, submits it through the existing
+        /api/hitl/request path, and — on approval — initializes the session's
+        runtime budget (ExecutionContext.approved_budget_usd) that Phase 2B
+        enforces on every subsequent LLM call.
+
+        AHP does not interpret plan['payload'] or decide what counts as a valid
+        plan beyond the two governance-relevant fields (plan_type, projected_cost_usd);
+        composing the plan (reading config, calling a planning LLM, reacting to a
+        chat trigger) is the caller's responsibility, not AHP's.
+        """
+        plan = plan if isinstance(plan, dict) else {}
+        plan_type = str(plan.get("plan_type") or "").strip()
+        projected_cost_usd = plan.get("projected_cost_usd")
+
+        if not plan_type:
+            return self._plan_result("error", reason="plan_type is required")
+        if (
+            not isinstance(projected_cost_usd, (int, float))
+            or isinstance(projected_cost_usd, bool)
+            or projected_cost_usd < 0
+        ):
+            return self._plan_result("error", reason="projected_cost_usd must be a non-negative number")
+
+        if not self._config.is_configured:
+            self._warn_unconfigured()
+            return self._plan_result("error", reason="AMP governance is not configured")
+
+        plan_id = str(uuid.uuid4())
+        summary = str(plan.get("summary") or "")
+        projected_cost_status = str(plan.get("projected_cost_status") or "estimated")
+        estimated_llm_calls = int(plan.get("estimated_llm_calls") or 0)
+        estimated_tool_calls = int(plan.get("estimated_tool_calls") or 0)
+        estimated_duration_minutes = int(plan.get("estimated_duration_minutes") or 0)
+        work_units_total = int(plan.get("work_units_total") or 0)
+        payload = plan.get("payload") or {}
+        cost = float(projected_cost_usd)
+
+        try:
+            instance_id = self._ensure_instance(session_id)
+        except Exception as exc:
+            return self._plan_result("error", plan_id=plan_id, reason=f"AMP instance init failed: {exc}")
+
+        self._safe_log(
+            instance_id,
+            f"Plan submitted | plan_id={plan_id} | plan_type={plan_type} | "
+            f"projected_cost=${cost:.6f} ({projected_cost_status})",
+        )
+
+        try:
+            response = self._client.request_plan_approval(
+                instance_id,
+                plan_id=plan_id,
+                plan_type=plan_type,
+                summary=summary,
+                projected_cost_usd=cost,
+                projected_cost_status=projected_cost_status,
+                estimated_llm_calls=estimated_llm_calls,
+                estimated_tool_calls=estimated_tool_calls,
+                estimated_duration_minutes=estimated_duration_minutes,
+                work_units_total=work_units_total,
+                payload=payload,
+            )
+        except Exception as exc:
+            self._safe_log(instance_id, f"AMP unavailable for plan approval: {exc}", level="ERROR")
+            return self._plan_result("error", plan_id=plan_id, reason=f"AMP governance unavailable: {exc}")
+
+        status = str(response.get("status") or "").strip().lower()
+        reason = str(response.get("reason") or response.get("information") or "").strip()
+
+        if status == "no_policy":
+            self._safe_log(instance_id, f"Plan decision | status=no_policy | plan_id={plan_id}", level="WARN")
+            return self._plan_result(
+                "rejected",
+                plan_id=plan_id,
+                reason=reason or f'No active AMP governance policy for agent "{self._config.agent_name}".',
+            )
+
+        if status in {"no-hitl", "allow", "allowed", "approved"}:
+            self._apply_approved_budget(session_id, instance_id, cost)
+            self._safe_log(instance_id, f"Plan approved | plan_id={plan_id} | budget=${cost:.6f}")
+            return self._plan_result("approved", plan_id=plan_id, approved_budget_usd=cost, reason=reason)
+
+        if status in {"pending", "waiting-for-response"} or response.get("workitem_id"):
+            workitem_id = str(response.get("workitem_id") or "").strip()
+            self._notify_user(
+                f"Execution plan submitted for AMP approval.\n"
+                f"Projected cost: ${cost:.4f}\n"
+                "Awaiting approval in AMP..."
+            )
+            self._safe_log(
+                instance_id,
+                f"Plan HITL requested | plan_id={plan_id} | workitem_id={workitem_id}",
+                level="WARN",
+            )
+
+            deadline = time.time() + (self._config.hitl_timeout_minutes * 60)
+            while time.time() < deadline:
+                time.sleep(max(self._config.hitl_poll_interval_seconds, 1))
+                try:
+                    decision = self._client.get_hitl_decision(instance_id)
+                except AmpClientError as exc:
+                    logger.warning("amp-governance plan decision poll failed: %s", exc)
+                    continue
+                if str(decision.get("status") or "").strip().lower() != "complete":
+                    continue
+                resolution = str(decision.get("resolution") or "").strip().lower()
+                info = str(decision.get("information") or "").strip()
+                if resolution in {"approve", "approved", "modify", "modified"}:
+                    self._apply_approved_budget(session_id, instance_id, cost)
+                    self._notify_user("Execution plan approved by AMP." + (f"\n{info}" if info else ""))
+                    self._safe_log(
+                        instance_id,
+                        f"Plan HITL approved | plan_id={plan_id} | budget=${cost:.6f}",
+                    )
+                    return self._plan_result(
+                        "approved", plan_id=plan_id, approved_budget_usd=cost,
+                        reason=info, workitem_id=workitem_id,
+                    )
+                self._notify_user(
+                    "AMP reviewer rejected the execution plan." + (f" {info}" if info else "")
+                )
+                self._safe_log(
+                    instance_id,
+                    f"Plan HITL rejected | plan_id={plan_id}" + (f" | {info}" if info else ""),
+                    level="WARN",
+                )
+                return self._plan_result(
+                    "rejected", plan_id=plan_id,
+                    reason=info or "Execution plan rejected by AMP HITL review.",
+                    workitem_id=workitem_id,
+                )
+            self._notify_user("AMP review of the execution plan timed out.")
+            self._safe_log(instance_id, f"Plan HITL timed out | plan_id={plan_id}", level="WARN")
+            return self._plan_result(
+                "timed_out", plan_id=plan_id,
+                reason="Timed out waiting for AMP HITL approval.",
+                workitem_id=workitem_id,
+            )
+
+        self._safe_log(instance_id, f"Plan unexpected AMP status '{status}' | plan_id={plan_id}", level="WARN")
+        return self._plan_result(
+            "error", plan_id=plan_id,
+            reason=f'AMP returned unexpected status "{status or "unknown"}".',
+        )
+
     def on_session_start(self, session_id: str = "", model: str = "", platform: str = "", **_: Any) -> None:
         if not session_id:
             return
@@ -837,6 +1016,15 @@ class AmpGovernancePlugin:
 
 
 _PLUGIN = AmpGovernancePlugin()
+
+
+def evaluate_proposed_plan(session_id: str, plan: Dict[str, Any]) -> Dict[str, Any]:
+    """Public Phase 3A entry point: submit a proposed execution plan for AMP approval.
+
+    Intended for a future caller (e.g. a research-agent skill) to call directly —
+    see AmpGovernancePlugin.evaluate_proposed_plan for the full contract.
+    """
+    return _PLUGIN.evaluate_proposed_plan(session_id, plan)
 
 
 def register(ctx) -> None:

@@ -182,6 +182,58 @@ class AmpClient:
             payload["approved_budget_usd"] = round(approved_budget_usd, 8)
         return self._request("POST", "/api/hitl/request", payload)
 
+    def request_plan_approval(
+        self,
+        instance_id: str,
+        *,
+        plan_id: str = "",
+        plan_type: str = "",
+        summary: str = "",
+        projected_cost_usd: float = 0.0,
+        projected_cost_status: str = "unknown",
+        estimated_llm_calls: int = 0,
+        estimated_tool_calls: int = 0,
+        estimated_duration_minutes: int = 0,
+        work_units_total: int = 0,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Submit a proposed execution plan to AMP for governance approval.
+
+        Reuses the same /api/hitl/request path as tool and LLM governance.
+        All plan fields are promoted to flat top-level payload fields so AMP's
+        eval-policy engine can reference them (e.g. plan_projected_cost_usd)
+        without any AMP schema change. `payload` carries caller-specific data
+        (e.g. research topics) and is passed through unmodified — AHP does not
+        interpret it.
+        """
+        return self._request(
+            "POST",
+            "/api/hitl/request",
+            {
+                "caller_id": instance_id,
+                "instance_id": instance_id,
+                "org_id": self._config.org_id,
+                "agent_name": self._config.agent_name,
+                "tool": "execution_plan",
+                "action": "submit",
+                "context": {
+                    "plan_id": plan_id,
+                    "summary": summary,
+                    "payload": payload or {},
+                },
+                "hitl": {"enable": True, "when": "policy"},
+                # Flat governance signals — AMP promotes these to policy params automatically
+                "plan_id": plan_id,
+                "plan_type": plan_type,
+                "plan_projected_cost_usd": round(float(projected_cost_usd), 8),
+                "plan_projected_cost_status": projected_cost_status,
+                "plan_estimated_llm_calls": estimated_llm_calls,
+                "plan_estimated_tool_calls": estimated_tool_calls,
+                "plan_estimated_duration_minutes": estimated_duration_minutes,
+                "plan_work_units_total": work_units_total,
+            },
+        )
+
     def log_llm_event(
         self,
         instance_id: str,

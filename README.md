@@ -174,6 +174,75 @@ AMP_LLM_GOVERNANCE_FAIL_CLOSED=false
 AMP_LLM_GOVERNANCE_INCLUDE_SUBAGENTS=true
 ```
 
+## Plan approval (Phase 3A)
+
+Phase 2B enforces a budget on every LLM call — but it doesn't have a budget until something sets one. Phase 3A is that missing piece: a **plan-governance interface** a caller uses once, up front, to get a proposed execution plan approved by AMP and turn that approval into the runtime budget Phase 2B enforces for the rest of the session.
+
+This is AHP-only plumbing. It does **not** decide what a "plan" is, read any config file, call a planning LLM, or react to a chat trigger — composing the plan and deciding when to submit it is entirely the caller's job (a future research-agent skill, or any other Hermes-side workflow). AHP's job is only: take a plan dict, get it approved, wire up the budget.
+
+**Interface:**
+
+```python
+result = evaluate_proposed_plan(
+    session_id,
+    plan={
+        "plan_type": "research",
+        "summary": "Research five configured topics",
+        "projected_cost_usd": 4.75,
+        "projected_cost_status": "estimated",  # optional, default "estimated"
+        "estimated_llm_calls": 18,              # optional, default 0
+        "estimated_tool_calls": 25,              # optional, default 0
+        "estimated_duration_minutes": 20,        # optional, default 0
+        "work_units_total": 5,                   # optional, default 0
+        "payload": {"topics": [...]},            # optional, opaque to AHP
+    },
+)
+```
+
+`evaluate_proposed_plan` is exported at module level (`from hermes import evaluate_proposed_plan` in this dev tree; once installed as a Hermes plugin, `amp_governance.evaluate_proposed_plan(...)`). It delegates to `AmpGovernancePlugin.evaluate_proposed_plan`.
+
+**Validation:** only the two governance-relevant fields are required — `plan_type` (non-empty string) and `projected_cost_usd` (non-negative number). A missing/invalid required field returns an error result immediately, without contacting AMP. Everything else is optional with safe defaults. `payload` is never interpreted by AHP — it is included in the AMP request's `context` unmodified and is meant for the caller's own downstream use (e.g. a Phase 3B execution step).
+
+**AMP normalization:** the plan is submitted through the existing `/api/hitl/request` path (same endpoint tool/LLM governance already use) — no new AMP API, no AMP schema change:
+
+```json
+{
+  "tool": "execution_plan",
+  "action": "submit",
+  "plan_id": "...",
+  "plan_type": "research",
+  "plan_projected_cost_usd": 4.75,
+  "plan_projected_cost_status": "estimated",
+  "plan_estimated_llm_calls": 18,
+  "plan_estimated_tool_calls": 25,
+  "plan_estimated_duration_minutes": 20,
+  "plan_work_units_total": 5
+}
+```
+
+These flat fields are promoted to policy `params` automatically, so an AMP eval-policy criterion can reference them directly, e.g. auto-approve when `plan_projected_cost_usd < 5.0`, otherwise require HITL.
+
+**Decision outcomes:**
+
+| AMP response | Result `status` | `approved_budget_usd` |
+|---|---|---|
+| `no-hitl` / `allow` / `allowed` / `approved` | `approved` | set immediately |
+| `pending` + HITL approve/modify | `approved` | set after reviewer decision |
+| `pending` + HITL reject | `rejected` | not set |
+| `pending` + HITL timeout | `timed_out` | not set |
+| `no_policy` | `rejected` | not set |
+| AMP unreachable, or unexpected status | `error` | not set |
+
+The full result shape:
+
+```python
+{"status": "approved", "plan_id": "...", "approved_budget_usd": 4.75, "reason": "", "workitem_id": None}
+```
+
+**Approved-budget initialization:** on approval (auto or HITL), AHP sets `approved_budget_usd` on the session's `ExecutionContext` to the plan's own `projected_cost_usd` — never a recomputed value. The `ExecutionContext` is created if `on_session_start` hadn't already created one, since Phase 2B's `llm_execution_middleware` silently allows calls when no context is tracked; without this, an approved plan would never actually constrain anything. From that point on, every LLM call in the session is evaluated against this budget by the existing Phase 2B enforcement path — no additional wiring needed.
+
+**Not implemented here (Phase 3B, separate):** detecting a chat trigger like "Run my research topics.", loading a topics config file, calling a planning LLM, and the research execution itself. See `HERMES_RESEARCH_SAMPLE_INTEGRATION_ASSESSMENT.md` for how that would plug into this interface, and `examples/research_topics.yaml` / `examples/research_planning_prompt.md` for the reference config/prompt shapes a future implementation would use.
+
 ## Prerequisites
 
 Before installing this plugin, make sure you already have:
