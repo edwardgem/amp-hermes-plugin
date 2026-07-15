@@ -118,6 +118,106 @@ class AmpClient:
             query={"caller_id": instance_id},
         )
 
+    def request_llm_hitl(
+        self,
+        instance_id: str,
+        *,
+        execution_id: str = "",
+        model: str = "",
+        provider: str = "",
+        session_id: str = "",
+        current_cost_usd: float = 0.0,
+        current_cost_status: str = "unknown",
+        approved_budget_usd: Optional[float] = None,
+        estimated_next_call_cost_usd: float = 0.0,
+        estimated_next_call_cost_status: str = "unknown",
+        projected_total_cost_usd: float = 0.0,
+        projected_total_cost_status: str = "unknown",
+        input_tokens_total: int = 0,
+        output_tokens_total: int = 0,
+        cache_read_tokens_total: int = 0,
+        cache_write_tokens_total: int = 0,
+        reasoning_tokens_total: int = 0,
+        total_tokens: int = 0,
+        llm_calls_total: int = 0,
+    ) -> Dict[str, Any]:
+        """Submit a pre-LLM-call governance signal to AMP and return the policy decision.
+
+        All cost and token fields are promoted to policy params by AMP's flat-field
+        promotion mechanism (no AMP schema change required).
+        """
+        payload: Dict[str, Any] = {
+            "caller_id": instance_id,
+            "instance_id": instance_id,
+            "org_id": self._config.org_id,
+            "agent_name": self._config.agent_name,
+            "tool": "llm",
+            "action": "invoke",
+            "context": {
+                "model": model,
+                "provider": provider,
+                "session_id": session_id,
+                "execution_id": execution_id,
+            },
+            "hitl": {"enable": True, "when": "policy"},
+            # Flat governance signals — AMP promotes these to policy params automatically
+            "execution_id": execution_id,
+            "model": model,
+            "provider": provider,
+            "current_cost_usd": round(current_cost_usd, 8),
+            "current_cost_status": current_cost_status,
+            "estimated_next_call_cost_usd": round(estimated_next_call_cost_usd, 8),
+            "estimated_next_call_cost_status": estimated_next_call_cost_status,
+            "projected_total_cost_usd": round(projected_total_cost_usd, 8),
+            "projected_total_cost_status": projected_total_cost_status,
+            "input_tokens_total": input_tokens_total,
+            "output_tokens_total": output_tokens_total,
+            "cache_read_tokens_total": cache_read_tokens_total,
+            "cache_write_tokens_total": cache_write_tokens_total,
+            "reasoning_tokens_total": reasoning_tokens_total,
+            "total_tokens": total_tokens,
+            "llm_calls_total": llm_calls_total,
+        }
+        if approved_budget_usd is not None:
+            payload["approved_budget_usd"] = round(approved_budget_usd, 8)
+        return self._request("POST", "/api/hitl/request", payload)
+
+    def log_llm_event(
+        self,
+        instance_id: str,
+        event: Dict[str, Any],
+        *,
+        execution_id: str = "",
+    ) -> None:
+        """Log a structured LLM call event to AMP."""
+        model = event.get("model", "")
+        call_num = event.get("api_call_number", "")
+        total_tokens = event.get("total_tokens", 0)
+        cost_usd = float(event.get("cost_usd") or 0.0)
+        cost_status = event.get("cost_status", "unknown")
+        parts = []
+        if execution_id:
+            parts.append(f"execution_id={execution_id}")
+        parts.append(
+            f"LLM call #{call_num} | model={model} | tokens={total_tokens} | "
+            f"cost_usd={cost_usd:.6f} | cost_status={cost_status}"
+        )
+        self.log(instance_id, " | ".join(parts))
+
+    def log_execution_summary(self, instance_id: str, summary: Dict[str, Any]) -> None:
+        """Log a final execution cost/usage summary to AMP."""
+        execution_id = summary.get("execution_id", "")
+        llm_calls = summary.get("llm_calls", 0)
+        total_tokens = summary.get("total_tokens", 0)
+        total_cost = float(summary.get("total_cost_usd") or 0.0)
+        cost_status = summary.get("cost_status", "unknown")
+        self.log(
+            instance_id,
+            f"Execution summary | execution_id={execution_id} | "
+            f"llm_calls={llm_calls} | total_tokens={total_tokens} | "
+            f"total_cost_usd={total_cost:.6f} | cost_status={cost_status}",
+        )
+
     def set_state(self, instance_id: str, state: str) -> None:
         self._request(
             "POST",

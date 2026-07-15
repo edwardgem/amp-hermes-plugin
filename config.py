@@ -77,6 +77,13 @@ class AmpConfig:
     hitl_timeout_minutes: int
     hitl_poll_interval_seconds: int
     fail_closed: bool
+    # Phase 1: Notification bridge
+    notifications_enabled: bool
+    # Phase 2A: LLM usage observation
+    llm_governance_enabled: bool
+    llm_governance_mode: str        # "observe" | "enforce"
+    llm_governance_fail_closed: bool
+    llm_governance_include_subagents: bool
 
     @property
     def is_configured(self) -> bool:
@@ -98,6 +105,8 @@ def load_config() -> AmpConfig:
     org_id = _env_value("AMP_ORG_ID", env_file)
     username = _env_value("AMP_USERNAME", env_file)
     agent_name = _env_value("AMP_AGENT_NAME", env_file, "AGENT_NAME")
+    llm_governance_mode_raw = _env_value("AMP_LLM_GOVERNANCE_MODE", env_file).strip().lower()
+    llm_governance_mode = llm_governance_mode_raw if llm_governance_mode_raw in {"observe", "enforce"} else "observe"
     return AmpConfig(
         backend_url=backend_url.rstrip("/"),
         api_key=api_key.removeprefix("Bearer ").removeprefix("bearer ").strip(),
@@ -116,4 +125,9 @@ def load_config() -> AmpConfig:
             "AMP_HITL_POLL_INTERVAL_SECONDS",
         ),
         fail_closed=_bool_value(env_file, True, "AMP_FAIL_CLOSED"),
+        notifications_enabled=_bool_value(env_file, True, "AMP_NOTIFICATIONS_ENABLED"),
+        llm_governance_enabled=_bool_value(env_file, False, "AMP_LLM_GOVERNANCE_ENABLED"),
+        llm_governance_mode=llm_governance_mode,
+        llm_governance_fail_closed=_bool_value(env_file, False, "AMP_LLM_GOVERNANCE_FAIL_CLOSED"),
+        llm_governance_include_subagents=_bool_value(env_file, True, "AMP_LLM_GOVERNANCE_INCLUDE_SUBAGENTS"),
     )
