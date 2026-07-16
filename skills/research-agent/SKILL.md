@@ -13,10 +13,11 @@ metadata:
 Checklist (do all of this in one continuous turn):
 1. Load topics (tool call) → 2. Build plan (write JSON) → 3. Submit for approval (tool call, waits) → 4. Branch: approved→continue, anything else→stop and report → 5. Research every topic (search + extract, all topics) → 6. Write synthesis → 7. Get governance summary (tool call) → 8. Send the one final report.
 
-**Three concrete mistakes from earlier runs of this exact skill — do not repeat any of them:**
+**Four concrete mistakes from earlier runs of this exact skill — do not repeat any of them:**
 - WRONG: after step 1, replying *"Your research topics have been successfully loaded... Would you like me to start the research now?"* — this is asking permission for something you were already told to do. Never do this.
 - WRONG: after step 5, replying with a per-topic list of search result titles/snippets and *"Let me know if you want... analysis and synthesis of this information"* — search results are raw material, not the deliverable, and synthesis is not optional follow-up work, it is step 6 of this same turn.
 - WRONG: seeing "run my research topics" again later in a conversation where you already loaded topics or got a plan approved earlier, and calling `web_search` directly because you already know the topics — **a prior approval earlier in this conversation does not apply to a new request.** Every time this workflow is triggered, run steps 1-4 again from scratch, including a fresh `amp_load_research_topics` call and a fresh `amp_evaluate_research_plan` call, even if you're confident you already know the topics or that a similar plan was approved before. AMP has no record of "already approved this session" — only of the specific plan you actually submit this time. Never call `web_search` or `web_extract` in response to this trigger without a fresh `status: "approved"` from `amp_evaluate_research_plan` in *this* invocation.
+- WRONG: right after `amp_evaluate_research_plan` returns `status: "approved"`, replying *"The research plan has been submitted and approved... The research is currently running, and I will keep you updated on any findings as they come in."* — this stops exactly like the first mistake above, and it is also a false statement: there is no background process and no mechanism to send later updates. Approval is not a milestone to report, it is a green light to immediately start calling `web_search`, in the same turn, with no reply in between.
 
 Follow the numbered steps below **in order**, do not skip or reorder them — the whole point of this workflow is that AMP approves the plan before any research spending happens, and that the user gets one complete report, not a running commentary.
 
@@ -34,7 +35,7 @@ Call `amp_evaluate_research_plan` with `{"plan": <the JSON object from step 2>}`
 
 ## 4. Branch on the result
 
-- `status: "approved"` — proceed to step 5.
+- `status: "approved"` — proceed *immediately* to step 5, in the same turn, with no reply to the user first. Do not send a summary of the approved plan, do not say "research is starting" or "I will keep you updated," do not describe what you're about to do. There is no mechanism for you to send updates as research progresses — if you say you will, that is a false statement, because the only message you send after this point is the step 8 report. Go straight to calling `web_search` for the first topic.
 - `status: "rejected"` — stop. Tell the user the plan was rejected and include the `reason` field. Do not research anything.
 - `status: "timed_out"` — stop. Tell the user AMP review timed out. Do not research anything.
 - `status: "error"` — stop. Tell the user AMP governance could not be reached and include the `reason` field. Do not research anything.

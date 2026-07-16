@@ -252,7 +252,7 @@ class AmpClient:
             parts.append(f"execution_id={execution_id}")
         parts.append(
             f"LLM call #{call_num} | model={model} | tokens={total_tokens} | "
-            f"cost_usd={cost_usd:.6f} | cost_status={cost_status}"
+            f"cost_usd={cost_usd:.2f} | cost_status={cost_status}"
         )
         self.log(instance_id, " | ".join(parts))
 
@@ -267,7 +267,7 @@ class AmpClient:
             instance_id,
             f"Execution summary | execution_id={execution_id} | "
             f"llm_calls={llm_calls} | total_tokens={total_tokens} | "
-            f"total_cost_usd={total_cost:.6f} | cost_status={cost_status}",
+            f"total_cost_usd={total_cost:.2f} | cost_status={cost_status}",
         )
 
     def set_state(self, instance_id: str, state: str) -> None:

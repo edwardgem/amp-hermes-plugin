@@ -952,9 +952,9 @@ class CostEstimationTests(unittest.TestCase):
         msg = AmpGovernancePlugin._format_cost_context(
             1.82, "estimated", 0.24, "estimated", 2.06, "estimated"
         )
-        self.assertIn("$1.8200", msg)
-        self.assertIn("$0.2400", msg)
-        self.assertIn("$2.0600", msg)
+        self.assertIn("$1.82", msg)
+        self.assertIn("$0.24", msg)
+        self.assertIn("$2.06", msg)
 
     def test_format_cost_context_unknown_costs(self):
         from hermes import AmpGovernancePlugin

@@ -257,7 +257,7 @@ class AmpGovernancePlugin:
         def _fmt(cost: float, status: str) -> str:
             if status == unknown:
                 return "unknown"
-            return f"${cost:.4f}"
+            return f"${cost:.2f}"
 
         lines = [
             f"Current cost: {_fmt(current_cost, current_status)}",
@@ -304,9 +304,9 @@ class AmpGovernancePlugin:
             instance_id,
             f"Pre-LLM policy eval | execution_id={exec_ctx.execution_id} | "
             f"model={model} | llm_call=#{api_call_count} | "
-            f"current_cost=${current_cost:.6f} ({current_status}) | "
-            f"est_next=${est_next:.6f} ({est_next_status}) | "
-            f"projected=${projected_total:.6f} ({projected_status})",
+            f"current_cost=${current_cost:.2f} ({current_status}) | "
+            f"est_next=${est_next:.2f} ({est_next_status}) | "
+            f"projected=${projected_total:.2f} ({projected_status})",
         )
 
         try:
@@ -690,7 +690,7 @@ class AmpGovernancePlugin:
         self._safe_log(
             instance_id,
             f"Plan submitted | plan_id={plan_id} | plan_type={plan_type} | "
-            f"projected_cost=${cost:.6f} ({projected_cost_status})",
+            f"projected_cost=${cost:.2f} ({projected_cost_status})",
         )
 
         try:
@@ -724,14 +724,14 @@ class AmpGovernancePlugin:
 
         if status in {"no-hitl", "allow", "allowed", "approved"}:
             self._apply_approved_budget(session_id, instance_id, cost)
-            self._safe_log(instance_id, f"Plan approved | plan_id={plan_id} | budget=${cost:.6f}")
+            self._safe_log(instance_id, f"Plan approved | plan_id={plan_id} | budget=${cost:.2f}")
             return self._plan_result("approved", plan_id=plan_id, approved_budget_usd=cost, reason=reason)
 
         if status in {"pending", "waiting-for-response"} or response.get("workitem_id"):
             workitem_id = str(response.get("workitem_id") or "").strip()
             self._notify_user(
                 f"Execution plan submitted for AMP approval.\n"
-                f"Projected cost: ${cost:.4f}\n"
+                f"Projected cost: ${cost:.2f}\n"
                 "Awaiting approval in AMP..."
             )
             self._safe_log(
@@ -757,7 +757,7 @@ class AmpGovernancePlugin:
                     self._notify_user("Execution plan approved by AMP." + (f"\n{info}" if info else ""))
                     self._safe_log(
                         instance_id,
-                        f"Plan HITL approved | plan_id={plan_id} | budget=${cost:.6f}",
+                        f"Plan HITL approved | plan_id={plan_id} | budget=${cost:.2f}",
                     )
                     return self._plan_result(
                         "approved", plan_id=plan_id, approved_budget_usd=cost,
