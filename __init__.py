@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import logging
+import math
 from pathlib import Path
 import re
+import threading
 import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
@@ -41,6 +43,73 @@ def _truncate(value: str, limit: int = 220) -> str:
     return f"{text[:limit - 3]}..."
 
 
+# ---------------------------------------------------------------------------
+# LLM trace capture (AMP's "click LLM in the log" panel) — see
+# amp_client.save_llm_trace and _save_llm_trace below.
+# ---------------------------------------------------------------------------
+
+_MAX_PENDING_PROMPTS = 200
+_TRACE_FIELD_CHARS = 2000
+
+
+def _extract_reasoning_from_assistant_message(assistant_message: Any) -> Optional[str]:
+    """Best-effort reasoning/thinking extraction from a provider response.
+
+    Adapted from Hermes' own agent/agent_runtime_helpers.py::extract_reasoning
+    (same attribute names/precedence) but kept self-contained here rather than
+    imported, since it's a handful of attribute checks, not Hermes-internal
+    logic AHP needs to stay coupled to. Most models (e.g. gpt-4o-mini) expose
+    none of these fields — that's expected, not an error; callers should
+    treat None as "no reasoning available", not "extraction failed".
+    """
+    if assistant_message is None:
+        return None
+    parts = []
+    reasoning = getattr(assistant_message, "reasoning", None)
+    if reasoning:
+        parts.append(str(reasoning))
+    reasoning_content = getattr(assistant_message, "reasoning_content", None)
+    if reasoning_content and str(reasoning_content) not in parts:
+        parts.append(str(reasoning_content))
+    reasoning_details = getattr(assistant_message, "reasoning_details", None)
+    if reasoning_details:
+        for detail in reasoning_details:
+            if not isinstance(detail, dict):
+                continue
+            summary = (
+                detail.get("summary")
+                or detail.get("thinking")
+                or detail.get("content")
+                or detail.get("text")
+            )
+            if summary and summary not in parts:
+                parts.append(str(summary))
+    if not parts:
+        return None
+    return _truncate("\n".join(parts), limit=_TRACE_FIELD_CHARS)
+
+
+def _summarize_assistant_answer(assistant_message: Any) -> str:
+    """Human-readable summary of what the assistant actually did on this
+    call: its response text if it wrote one, otherwise which tools it called
+    and with what arguments (a tool-calls-only turn has empty .content)."""
+    if assistant_message is None:
+        return ""
+    content = (getattr(assistant_message, "content", None) or "").strip()
+    if content:
+        return _truncate(content, limit=_TRACE_FIELD_CHARS)
+    tool_calls = getattr(assistant_message, "tool_calls", None) or []
+    if not tool_calls:
+        return ""
+    described = []
+    for call in tool_calls:
+        fn = getattr(call, "function", None)
+        name = getattr(fn, "name", None) or getattr(call, "name", None) or "unknown_tool"
+        args = getattr(fn, "arguments", None) or getattr(call, "arguments", None) or ""
+        described.append(f"{name}({_truncate(str(args), limit=200)})")
+    return _truncate("Called: " + ", ".join(described), limit=_TRACE_FIELD_CHARS)
+
+
 _FRESHNESS_PATTERNS = [
     re.compile(r"\b(today|latest|current|currently|recent|now|right now)\b", re.IGNORECASE),
     re.compile(
@@ -60,6 +129,20 @@ _EXPLICIT_SEARCH_PATTERNS = [
     re.compile(r"\b(web search|search the web|look up|lookup|find online|search online)\b", re.IGNORECASE),
 ]
 
+_RESEARCH_TRIGGER_PATTERN = re.compile(r"\bresearch\b", re.IGNORECASE)
+
+# Same configured-vs-ad-hoc distinction documented in the two pointer skills'
+# own descriptions (skills-pointer/amp-research{,-topic}/SKILL.md). Resolved
+# here, once, instead of leaving it to the model to pick the right pointer
+# skill by NL matching -- that was observed to pick the wrong one for a
+# clearly ad hoc message ("research US market today" loaded amp-research,
+# the configured-mode pointer, and ran unrelated saved topics).
+_CONFIGURED_MODE_PATTERN = re.compile(
+    r"\bresearch\b.{0,20}\btopics?\b|\btopics?\b.{0,20}\bresearch\b|"
+    r"\bmy\b.{0,20}\bresearch\b|\bresearch\b.{0,20}\bmy\b",
+    re.IGNORECASE,
+)
+
 
 def _needs_live_web_search(user_message: str) -> bool:
     text = str(user_message or "").strip()
@@ -69,6 +152,22 @@ def _needs_live_web_search(user_message: str) -> bool:
     has_live_domain = any(pattern.search(text) for pattern in _LIVE_DATA_DOMAIN_PATTERNS)
     has_explicit_search = any(pattern.search(text) for pattern in _EXPLICIT_SEARCH_PATTERNS)
     return has_explicit_search or (has_freshness and has_live_domain)
+
+
+def _mentions_research(user_message: str) -> bool:
+    """True if the message uses the word "research" -- the trigger word for
+    the AMP-governed research workflow. When true, pre_llm_call injects a
+    directive routing straight to the governed skill (see
+    _build_research_skill_context) instead of the freshness-search context.
+    """
+    return bool(_RESEARCH_TRIGGER_PATTERN.search(str(user_message or "")))
+
+
+def _is_configured_mode_request(user_message: str) -> bool:
+    """True for "run my saved/configured research topics" phrasing, false
+    for a message naming a specific topic (e.g. "research the US market").
+    """
+    return bool(_CONFIGURED_MODE_PATTERN.search(str(user_message or "")))
 
 
 def _build_live_search_context(user_message: str) -> str:
@@ -81,6 +180,48 @@ def _build_live_search_context(user_message: str) -> str:
         "Use the web_search tool first to verify current facts before answering.\n"
         "If live search is unavailable, state that you cannot verify current information."
     )
+
+
+def _build_research_skill_context(user_message: str) -> str:
+    mode = "CONFIGURED" if _is_configured_mode_request(user_message) else "AD HOC"
+    now = datetime.now(timezone.utc)
+    today_utc = f"{now.strftime('%B')} {now.day}, {now.year}"
+    return (
+        f"Current UTC date: {today_utc}. Use this as \"today\" for every part of "
+        "this workflow -- search queries, lookback windows, and the final "
+        "report's dateline -- never your own belief about the current date.\n"
+        f"This request is for the AMP-governed research workflow, mode={mode}.\n"
+        "Do not call web_search, and do not call skill_view on amp-research "
+        "or amp-research-topic -- go straight to the real skill: call "
+        'skill_view(name="amp-governance:research-agent") now and follow it '
+        f"exactly. Its step 0 is already decided for you: mode={mode}."
+    )
+
+
+def _infer_pricing_provider(provider: str, base_url: str) -> str:
+    """Resolve the provider string used for *pricing lookups only* -- separate
+    from whatever Hermes' own auth-provider config says.
+
+    Hermes' auth-provider config often uses "custom" for a generic
+    OpenAI-compatible endpoint (its auth-provider vocabulary, validated at
+    startup against a fixed list, doesn't include "openai" as a value even
+    though the pricing module's billing-route vocabulary does -- confirmed by
+    `hermes doctor` rejecting `provider: openai` outright). So config.yaml
+    can't simply say `provider: openai` to get real per-token OpenAI rates;
+    doing so breaks live LLM calls entirely. Infer the real provider from
+    base_url instead, only when Hermes' own provider tag isn't already
+    something billing-specific (i.e. don't override a real, distinct
+    provider like "anthropic" that's already correct).
+    """
+    if provider and provider.lower() not in {"custom", "local"}:
+        return provider
+    try:
+        from utils import base_url_host_matches
+    except Exception:
+        return provider
+    if base_url_host_matches(base_url, "openai.com"):
+        return "openai"
+    return provider
 
 
 def _calc_cost(
@@ -106,11 +247,56 @@ def _calc_cost(
             cache_write_tokens=int(usage.get("cache_write_tokens") or 0),
             reasoning_tokens=int(usage.get("reasoning_tokens") or 0),
         )
-        result = estimate_usage_cost(model, cu, provider=provider or None, base_url=base_url or None)
+        effective_provider = _infer_pricing_provider(provider, base_url)
+        result = estimate_usage_cost(model, cu, provider=effective_provider or None, base_url=base_url or None)
         cost = float(result.amount_usd or 0.0)
         return cost, str(result.status), str(result.source)
     except Exception:
         return 0.0, "unknown", ""
+
+
+# Calibrated from observed production token usage across research-agent runs
+# (post_api_request "LLM call" log data): individual calls in this workflow
+# ranged from ~16K to ~55K total tokens, driven mostly by the growing
+# conversation history each turn resends as input. Rounded up per the
+# "be conservative" principle used elsewhere in plan estimation -- this
+# feeds a HITL budget gate, not a bill, so overstating is the safe error.
+_RESEARCH_ASSUMED_INPUT_TOKENS_PER_CALL = 35_000
+_RESEARCH_ASSUMED_OUTPUT_TOKENS_PER_CALL = 1_500
+
+
+def _project_research_cost(exec_ctx: Optional[ExecutionContext], estimated_llm_calls: int) -> tuple[float, str]:
+    """Deterministically project a research plan's dollar cost from a call-count
+    estimate x real per-token pricing, instead of asking the LLM to invent a
+    dollar figure outright. The model is reasonably placed to judge how many
+    LLM calls a run needs (that's what estimated_llm_calls is); it has no
+    grounded way to know actual $/token rates, and asking it to guess both at
+    once routinely produced numbers wildly disconnected from reality (e.g.
+    $100 projected for a run that actually costs a few cents). Uses the
+    session's own most-recently-observed model/provider/base_url so the
+    projection reflects real pricing for whatever's actually configured.
+
+    Returns (projected_cost_usd, projected_cost_status). Falls back to
+    (0.0, "unknown") when there's nothing to price against yet (e.g. no LLM
+    call has happened in this session) or pricing data isn't available for
+    the resolved route -- callers should treat "unknown" the same way AMP's
+    policy criteria already treat any other unknown-cost plan.
+    """
+    if estimated_llm_calls <= 0 or exec_ctx is None or not exec_ctx.model:
+        return 0.0, "unknown"
+    usage = {
+        "input_tokens": _RESEARCH_ASSUMED_INPUT_TOKENS_PER_CALL * estimated_llm_calls,
+        "output_tokens": _RESEARCH_ASSUMED_OUTPUT_TOKENS_PER_CALL * estimated_llm_calls,
+    }
+    cost_usd, cost_status, _source = _calc_cost(
+        exec_ctx.model, exec_ctx.last_provider, exec_ctx.last_base_url, usage
+    )
+    if cost_status == "unknown":
+        return 0.0, "unknown"
+    # The token counts above are assumed, not measured, so the result is
+    # always a projection regardless of how confident the price lookup
+    # itself was -- round up to the cent, never under-quote the approver.
+    return math.ceil(cost_usd * 100) / 100.0, "estimated"
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +366,12 @@ class AmpGovernancePlugin:
         self._warned_unconfigured = False
         self._blocked_turn_messages: Dict[str, str] = {}
         self._dispatch_tool = None
+        # api_request_id -> truncated triggering user message, stashed by
+        # pre_api_request and consumed by post_api_request to build LLM trace
+        # entries (see _save_llm_trace). Capped so a request that never gets
+        # a matching post_api_request (e.g. an error path) can't leak memory.
+        self._pending_prompts: Dict[str, str] = {}
+        self._pending_prompts_lock = threading.Lock()
 
     def _warn_unconfigured(self) -> None:
         if self._warned_unconfigured:
@@ -725,19 +917,29 @@ class AmpGovernancePlugin:
         if status in {"no-hitl", "allow", "allowed", "approved"}:
             self._apply_approved_budget(session_id, instance_id, cost)
             self._safe_log(instance_id, f"Plan approved | plan_id={plan_id} | budget=${cost:.2f}")
+            # Distinct from the pending/HITL branch below: this plan never
+            # reached a human reviewer at all -- say so explicitly, so
+            # "why wasn't I asked to approve this" isn't a silent question.
+            self._notify_user(
+                "Execution plan approved automatically -- no human review "
+                f"required under AMP's current policy.\nBudget: ${cost:.2f}\n"
+                "Researching now -- the report will follow shortly."
+            )
             return self._plan_result("approved", plan_id=plan_id, approved_budget_usd=cost, reason=reason)
 
         if status in {"pending", "waiting-for-response"} or response.get("workitem_id"):
+            # workitem_id is always empty at this point -- AMP's synchronous
+            # /api/hitl/request response for a still-pending decision doesn't
+            # include it yet (it's created moments later by a separate
+            # internal service call); a log line for it here would always
+            # show workitem_id= with nothing after it, so we don't write one.
+            # AMP's own "[HITL] Created work item..." log line (a different
+            # service) is the one with the real id.
             workitem_id = str(response.get("workitem_id") or "").strip()
             self._notify_user(
                 f"Execution plan submitted for AMP approval.\n"
                 f"Projected cost: ${cost:.2f}\n"
                 "Awaiting approval in AMP..."
-            )
-            self._safe_log(
-                instance_id,
-                f"Plan HITL requested | plan_id={plan_id} | workitem_id={workitem_id}",
-                level="WARN",
             )
 
             deadline = time.time() + (self._config.hitl_timeout_minutes * 60)
@@ -754,7 +956,10 @@ class AmpGovernancePlugin:
                 info = str(decision.get("information") or "").strip()
                 if resolution in {"approve", "approved", "modify", "modified"}:
                     self._apply_approved_budget(session_id, instance_id, cost)
-                    self._notify_user("Execution plan approved by AMP." + (f"\n{info}" if info else ""))
+                    self._notify_user(
+                        "Execution plan approved by AMP." + (f"\n{info}" if info else "")
+                        + "\nResearching now -- the report will follow shortly."
+                    )
                     self._safe_log(
                         instance_id,
                         f"Plan HITL approved | plan_id={plan_id} | budget=${cost:.2f}",
@@ -855,6 +1060,49 @@ class AmpGovernancePlugin:
         finally:
             self._store.delete(session_id)
 
+    def pre_api_request(
+        self,
+        api_request_id: str = "",
+        user_message: str = "",
+        session_id: str = "",
+        provider: str = "",
+        base_url: str = "",
+        **_: Any,
+    ) -> None:
+        """Stash the triggering user message for this specific provider call,
+        keyed by api_request_id, so post_api_request can attach it to the
+        LLM trace entry it saves. Only active when LLM governance is enabled
+        (same gate as post_api_request) — this hook exists purely to feed
+        that one.
+
+        Also records provider/base_url onto the session's ExecutionContext
+        immediately (not just in post_api_request's accumulate step). This
+        call hasn't completed yet, so there's no usage/cost to accumulate --
+        but a plan-evaluation tool call requested by *this same* completion
+        (e.g. amp_evaluate_research_plan) dispatches before post_api_request
+        for it ever fires, since tool dispatch happens between "response
+        received" and "usage accumulated". _project_research_cost needs
+        provider/base_url to project a plan's cost before that ordering
+        would otherwise make them available.
+        """
+        if not self._config.llm_governance_enabled or not api_request_id:
+            return
+        if session_id:
+            exec_ctx = self._exec_contexts.get(session_id)
+            if exec_ctx is not None:
+                exec_ctx.last_provider = provider or exec_ctx.last_provider
+                exec_ctx.last_base_url = base_url or exec_ctx.last_base_url
+        with self._pending_prompts_lock:
+            if len(self._pending_prompts) >= _MAX_PENDING_PROMPTS:
+                self._pending_prompts.pop(next(iter(self._pending_prompts)), None)
+            self._pending_prompts[api_request_id] = _truncate(user_message, limit=_TRACE_FIELD_CHARS)
+
+    def _pop_pending_prompt(self, api_request_id: str) -> str:
+        if not api_request_id:
+            return ""
+        with self._pending_prompts_lock:
+            return self._pending_prompts.pop(api_request_id, "")
+
     def pre_llm_call(self, session_id: str = "", user_message: str = "", model: str = "", platform: str = "", **_: Any) -> None:
         if not session_id or not self._config.is_configured:
             if not self._config.is_configured:
@@ -865,6 +1113,10 @@ class AmpGovernancePlugin:
             instance_id = self._ensure_instance(session_id, model=model, platform=platform)
             if user_message:
                 self._safe_log(instance_id, f"User prompt: {_truncate(user_message)}")
+            if _mentions_research(user_message):
+                context = _build_research_skill_context(user_message)
+                self._safe_log(instance_id, "Research routing | injected skill-load directive")
+                return {"context": context}
             if _needs_live_web_search(user_message):
                 context = _build_live_search_context(user_message)
                 self._safe_log(instance_id, "Freshness routing | injected live-search context")
@@ -955,6 +1207,7 @@ class AmpGovernancePlugin:
         api_call_count: int = 0,
         api_duration: float = 0.0,
         usage: Optional[Dict] = None,
+        assistant_message: Any = None,
         **_: Any,
     ) -> None:
         """
@@ -1005,6 +1258,8 @@ class AmpGovernancePlugin:
             api_duration=api_duration,
         )
         exec_ctx.accumulate(record)
+        exec_ctx.last_provider = provider or exec_ctx.last_provider
+        exec_ctx.last_base_url = base_url or exec_ctx.last_base_url
 
         # Log to AMP (best-effort, non-blocking)
         try:
@@ -1015,6 +1270,35 @@ class AmpGovernancePlugin:
             )
         except Exception as exc:
             logger.warning("amp-governance llm event log failed: %s", exc)
+
+        self._save_llm_trace(exec_ctx.instance_id, api_request_id, model, assistant_message)
+
+    def _save_llm_trace(
+        self,
+        instance_id: str,
+        api_request_id: str,
+        model: str,
+        assistant_message: Any,
+    ) -> None:
+        """Best-effort: save what this LLM call was asked and what it decided
+        so AMP's "click LLM in the log" panel has something real to show.
+        Never raises — a failure here must never affect the LLM call itself
+        or the cost/token accumulation above, which already succeeded."""
+        try:
+            user_message = self._pop_pending_prompt(api_request_id)
+            prompt = {"user": user_message} if user_message else None
+            reasoning = _extract_reasoning_from_assistant_message(assistant_message)
+            answer = _summarize_assistant_answer(assistant_message)
+            self._client.save_llm_trace(
+                instance_id,
+                call_time=datetime.now(timezone.utc).isoformat(),
+                model=model,
+                prompt=prompt,
+                reasoning=reasoning,
+                answer=answer or None,
+            )
+        except Exception as exc:
+            logger.warning("amp-governance llm trace save failed: %s", exc)
 
     def transform_llm_output(
         self,
@@ -1068,7 +1352,9 @@ _EVALUATE_RESEARCH_PLAN_SCHEMA = {
         "Submit a proposed research execution plan to AMP for governance approval "
         "before starting any research. Blocks until a decision is reached (which may "
         "involve a human reviewer in AMP) and returns the structured decision. Do not "
-        "begin researching any topic until this returns status=\"approved\"."
+        "begin researching any topic until this returns status=\"approved\". Do not "
+        "include a dollar cost anywhere in the plan -- AHP computes it from "
+        "estimated_llm_calls and real pricing, and overwrites anything you put there."
     ),
     "parameters": {
         "type": "object",
@@ -1079,9 +1365,10 @@ _EVALUATE_RESEARCH_PLAN_SCHEMA = {
                 "properties": {
                     "plan_type": {"type": "string", "description": 'Always "research" for this workflow.'},
                     "summary": {"type": "string"},
-                    "projected_cost_usd": {"type": "number"},
-                    "projected_cost_status": {"type": "string"},
-                    "estimated_llm_calls": {"type": "integer"},
+                    "estimated_llm_calls": {
+                        "type": "integer",
+                        "description": "Must be a positive integer -- a reviewer's budget decision depends on it.",
+                    },
                     "estimated_tool_calls": {"type": "integer"},
                     "estimated_duration_minutes": {"type": "integer"},
                     "work_units_total": {"type": "integer"},
@@ -1093,7 +1380,7 @@ _EVALUATE_RESEARCH_PLAN_SCHEMA = {
                         ),
                     },
                 },
-                "required": ["plan_type", "projected_cost_usd"],
+                "required": ["plan_type", "estimated_llm_calls"],
             },
         },
         "required": ["plan"],
@@ -1134,7 +1421,41 @@ def _tool_amp_evaluate_research_plan(args: dict, **_: Any) -> str:
             "status": "error", "plan_id": None, "approved_budget_usd": None,
             "reason": "plan must be an object", "workitem_id": None,
         })
-    result = _PLUGIN.evaluate_proposed_plan(_current_session_id(), plan)
+    session_id = _current_session_id()
+    # projected_cost_usd/projected_cost_status are always computed here, not
+    # taken from whatever the model put in the plan -- see
+    # _project_research_cost for why an LLM-invented dollar figure isn't
+    # trustworthy enough to gate a HITL budget decision on.
+    try:
+        estimated_llm_calls = int(plan.get("estimated_llm_calls") or 0)
+    except (TypeError, ValueError):
+        estimated_llm_calls = 0
+    if estimated_llm_calls <= 0:
+        # A plan with no call estimate can only ever project to $0.00
+        # (unknown) -- reject it here rather than letting a hollow plan
+        # through to an approval decision no reviewer could meaningfully
+        # make. Forces the model to actually produce the full plan schema
+        # instead of skipping straight to submission.
+        return json.dumps({
+            "status": "error", "plan_id": None, "approved_budget_usd": None,
+            "reason": "plan.estimated_llm_calls must be a positive integer",
+            "workitem_id": None,
+        })
+    exec_ctx = _PLUGIN._exec_contexts.get(session_id) if session_id else None
+    cost_usd, cost_status = _project_research_cost(exec_ctx, estimated_llm_calls)
+    plan["projected_cost_usd"] = cost_usd
+    plan["projected_cost_status"] = cost_status
+    if exec_ctx is not None:
+        exec_ctx.last_plan_projected_cost_usd = cost_usd
+        exec_ctx.last_plan_projected_cost_status = cost_status
+    result = _PLUGIN.evaluate_proposed_plan(session_id, plan)
+    if result.get("status") == "approved" and session_id:
+        # Re-fetch: evaluate_proposed_plan's _apply_approved_budget lazily
+        # creates the ExecutionContext on approval if on_session_start
+        # somehow hadn't already, so exec_ctx above may be stale/None.
+        approved_exec_ctx = _PLUGIN._exec_contexts.get(session_id)
+        if approved_exec_ctx is not None:
+            approved_exec_ctx.plan_approvals_count += 1
     return json.dumps(result)
 
 
@@ -1147,9 +1468,48 @@ def _tool_amp_load_research_topics(args: dict, **_: Any) -> str:
     return json.dumps({"status": "ok", **topics})
 
 
+def _format_governance_report_text(summary: dict) -> str:
+    """Deterministically render the exact "Governance summary" text block
+    research-agent's step 8 pastes verbatim into its final reply.
+
+    This exists because asking the model to *compose* this section from
+    numbers it read across several earlier tool calls (and, worse, from
+    memory of an earlier turn's report in the same conversation) proved
+    unreliable in practice: a long-running session was observed reproducing
+    an earlier turn's fabricated figures verbatim in every subsequent
+    report, rather than calling amp_governance_summary fresh each time.
+    Returning ready-made text removes the opportunity to substitute,
+    "improve", or reuse a stale number -- every value here comes straight
+    from the session's real accumulated ExecutionContext.
+    """
+    plan_cost = summary.get("plan_projected_cost_usd")
+    plan_cost_status = summary.get("plan_projected_cost_status", "unknown")
+    plan_cost_line = f"${plan_cost:.2f} ({plan_cost_status})" if plan_cost is not None else "unavailable"
+
+    approved_budget = summary.get("approved_budget_usd")
+    approved_budget_line = f"${approved_budget:.2f}" if approved_budget is not None else "unavailable"
+
+    cost_status = summary.get("cost_status", "unknown")
+    if cost_status in ("actual", "estimated"):
+        actual_cost_line = f"${float(summary.get('total_cost_usd') or 0.0):.2f}"
+    else:
+        actual_cost_line = f"cost tracking unavailable for this model (cost_status={cost_status})"
+
+    return (
+        "Governance summary\n"
+        f"Plan projected cost: {plan_cost_line}\n"
+        f"Approved budget: {approved_budget_line}\n"
+        f"Actual cost: {actual_cost_line}\n"
+        f"LLM calls: {summary.get('llm_calls', 0)}\n"
+        f"Tool calls: {summary.get('tool_calls', 0)}\n"
+        f"AMP plan approvals: {summary.get('plan_approvals_count', 0)}\n"
+        f"Runtime HITL approvals: {summary.get('llm_hitl_approved', 0)}"
+    )
+
+
 def _tool_amp_governance_summary(args: dict, **_: Any) -> str:
-    """Returns ExecutionContext.to_summary_dict() as-is (it already carries its
-    own 'status' field describing execution state, e.g. "running"). The only
+    """Returns ExecutionContext.to_summary_dict() plus a ready-to-paste
+    'report_text' field (see _format_governance_report_text). The only
     sentinel this adds is status="no_context", which never collides with a
     real execution status, for when nothing has been tracked yet."""
     session_id = _current_session_id()
@@ -1159,7 +1519,9 @@ def _tool_amp_governance_summary(args: dict, **_: Any) -> str:
             "status": "no_context",
             "reason": "No active AMP execution context for this session yet.",
         })
-    return json.dumps(exec_ctx.to_summary_dict())
+    summary = exec_ctx.to_summary_dict()
+    summary["report_text"] = _format_governance_report_text(summary)
+    return json.dumps(summary)
 
 
 def register(ctx) -> None:
@@ -1169,6 +1531,7 @@ def register(ctx) -> None:
     ctx.register_hook("pre_llm_call", _PLUGIN.pre_llm_call)
     ctx.register_hook("pre_tool_call", _PLUGIN.pre_tool_call)
     ctx.register_hook("post_tool_call", _PLUGIN.post_tool_call)
+    ctx.register_hook("pre_api_request", _PLUGIN.pre_api_request)
     ctx.register_hook("post_api_request", _PLUGIN.post_api_request)
     ctx.register_hook("transform_llm_output", _PLUGIN.transform_llm_output)
 

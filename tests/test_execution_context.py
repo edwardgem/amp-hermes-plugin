@@ -192,6 +192,31 @@ class ExecutionContextTests(unittest.TestCase):
         self.assertEqual(s["tool_calls"], 2)
         self.assertAlmostEqual(s["total_cost_usd"], 0.004, places=7)
 
+    def test_initial_plan_governance_fields(self) -> None:
+        ctx = self._make_ctx()
+        self.assertIsNone(ctx.last_plan_projected_cost_usd)
+        self.assertEqual(ctx.last_plan_projected_cost_status, "unknown")
+        self.assertEqual(ctx.plan_approvals_count, 0)
+        self.assertEqual(ctx.last_provider, "")
+        self.assertEqual(ctx.last_base_url, "")
+
+    def test_to_summary_dict_omits_plan_projected_cost_when_unset(self) -> None:
+        ctx = self._make_ctx()
+        s = ctx.to_summary_dict()
+        self.assertNotIn("plan_projected_cost_usd", s)
+        self.assertNotIn("plan_projected_cost_status", s)
+        self.assertEqual(s["plan_approvals_count"], 0)
+
+    def test_to_summary_dict_includes_plan_projected_cost_when_set(self) -> None:
+        ctx = self._make_ctx()
+        ctx.last_plan_projected_cost_usd = 0.03
+        ctx.last_plan_projected_cost_status = "estimated"
+        ctx.plan_approvals_count = 1
+        s = ctx.to_summary_dict()
+        self.assertAlmostEqual(s["plan_projected_cost_usd"], 0.03, places=7)
+        self.assertEqual(s["plan_projected_cost_status"], "estimated")
+        self.assertEqual(s["plan_approvals_count"], 1)
+
 
 class ExecutionContextStoreTests(unittest.TestCase):
     def test_create_and_get(self) -> None:

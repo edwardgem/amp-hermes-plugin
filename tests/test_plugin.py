@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import json
 import sys
 from pathlib import Path
@@ -9,10 +10,25 @@ from unittest.mock import Mock, PropertyMock, patch
 
 ROOT = Path(__file__).resolve().parent.parent
 ROOT_PARENT = ROOT.parent
+HERMES_AGENT_ROOT = Path.home() / ".hermes" / "hermes-agent"
 if str(ROOT_PARENT) not in sys.path:
     sys.path.insert(0, str(ROOT_PARENT))
+if HERMES_AGENT_ROOT.exists() and str(HERMES_AGENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(HERMES_AGENT_ROOT))
 
-from hermes import _build_live_search_context, _needs_live_web_search, AmpGovernancePlugin
+from hermes import (
+    _build_live_search_context,
+    _build_research_skill_context,
+    _calc_cost,
+    _extract_reasoning_from_assistant_message,
+    _infer_pricing_provider,
+    _is_configured_mode_request,
+    _mentions_research,
+    _needs_live_web_search,
+    _summarize_assistant_answer,
+    _TRACE_FIELD_CHARS,
+    AmpGovernancePlugin,
+)
 from hermes.policy import NormalizedAction
 
 
@@ -70,6 +86,168 @@ class FreshnessRoutingTests(unittest.TestCase):
                 platform="slack",
             )
         self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# Research-word carve-out: freshness routing must not steal ad hoc research
+# requests away from the amp-research-topic skill just because they also
+# happen to use time-sensitive/market-y wording (e.g. "today", "market").
+# ---------------------------------------------------------------------------
+
+class ResearchCarveOutTests(unittest.TestCase):
+    def test_mentions_research_true_for_research_word(self) -> None:
+        self.assertTrue(_mentions_research("Research ORCL stock price"))
+        self.assertTrue(_mentions_research("research the US market today"))
+
+    def test_mentions_research_false_without_research_word(self) -> None:
+        self.assertFalse(_mentions_research("What is the stock price of ORCL?"))
+        self.assertFalse(_mentions_research("What is the weather in SF today?"))
+
+    def test_pre_llm_call_injects_skill_load_directive_when_research_mentioned(self) -> None:
+        plugin = AmpGovernancePlugin()
+        with patch.object(type(plugin._config), "is_configured", new_callable=PropertyMock, return_value=True), \
+             patch.object(plugin, "_ensure_instance", return_value="inst-1"), \
+             patch.object(plugin, "_safe_log"):
+            result = plugin.pre_llm_call(
+                session_id="sess-1",
+                user_message="research the US market today",
+                model="test-model",
+                platform="slack",
+            )
+        self.assertIsInstance(result, dict)
+        assert isinstance(result, dict)
+        self.assertIn("context", result)
+        self.assertIn("amp-governance:research-agent", result["context"])
+        self.assertNotIn("web_search tool first", result["context"])
+
+    def test_research_directive_takes_priority_over_freshness_wording(self) -> None:
+        """"research on US-Iran situation today" matches both the research
+        trigger and the freshness heuristic -- research must win, since a
+        governed workflow request should never be diverted into a direct,
+        ungoverned web_search."""
+        plugin = AmpGovernancePlugin()
+        with patch.object(type(plugin._config), "is_configured", new_callable=PropertyMock, return_value=True), \
+             patch.object(plugin, "_ensure_instance", return_value="inst-1"), \
+             patch.object(plugin, "_safe_log") as mock_log:
+            result = plugin.pre_llm_call(
+                session_id="sess-1",
+                user_message="research on US-Iran situation today",
+                model="test-model",
+                platform="slack",
+            )
+        assert isinstance(result, dict)
+        self.assertIn("amp-governance:research-agent", result["context"])
+        logged_messages = [call.args[1] for call in mock_log.call_args_list]
+        self.assertTrue(any("Research routing" in msg for msg in logged_messages))
+        self.assertFalse(any("Freshness routing" in msg for msg in logged_messages))
+
+    def test_build_research_skill_context_names_the_skill(self) -> None:
+        context = _build_research_skill_context("research ORCL stock price")
+        self.assertIn("amp-governance:research-agent", context)
+        self.assertIn("skill_view", context)
+
+    def test_build_research_skill_context_forbids_pointer_skills(self) -> None:
+        context = _build_research_skill_context("research the US market today")
+        self.assertIn("amp-research", context)
+        self.assertIn("amp-research-topic", context)
+
+    def test_is_configured_mode_request_true_for_saved_topics_phrasing(self) -> None:
+        self.assertTrue(_is_configured_mode_request("run my research topics"))
+        self.assertTrue(_is_configured_mode_request("Research my configured topics"))
+        self.assertTrue(_is_configured_mode_request("Run my daily research"))
+
+    def test_is_configured_mode_request_false_for_named_topic(self) -> None:
+        self.assertFalse(_is_configured_mode_request("research the US market today"))
+        self.assertFalse(_is_configured_mode_request("research ORCL stock price"))
+        self.assertFalse(_is_configured_mode_request("research on US-Iran situation today"))
+
+    def test_build_research_skill_context_tags_configured_mode(self) -> None:
+        context = _build_research_skill_context("run my research topics")
+        self.assertIn("mode=CONFIGURED", context)
+
+    def test_build_research_skill_context_tags_ad_hoc_mode(self) -> None:
+        context = _build_research_skill_context("research the US market today")
+        self.assertIn("mode=AD HOC", context)
+
+    def test_build_research_skill_context_grounds_current_date(self) -> None:
+        """A research request must be told the real current date the same way
+        freshness routing already is -- otherwise the model falls back to a
+        stale/hallucinated date for both search queries and the report
+        dateline (observed: "October 2023" search queries and report header
+        while the real date was July 2026)."""
+        with patch("hermes.datetime") as mock_datetime:
+            mock_datetime.now.return_value = datetime(2026, 7, 17, tzinfo=timezone.utc)
+            context = _build_research_skill_context("research the US market today")
+        self.assertIn("Current UTC date: July 17, 2026", context)
+
+    def test_pre_llm_call_still_injects_context_for_plain_freshness_query(self) -> None:
+        """Weather/stock-price/current-events questions with no "research"
+        wording must keep using the pre-existing freshness routing path
+        unchanged."""
+        plugin = AmpGovernancePlugin()
+        with patch.object(type(plugin._config), "is_configured", new_callable=PropertyMock, return_value=True), \
+             patch.object(plugin, "_ensure_instance", return_value="inst-1"), \
+             patch.object(plugin, "_safe_log"):
+            result = plugin.pre_llm_call(
+                session_id="sess-1",
+                user_message="What is the stock price of ORCL today?",
+                model="test-model",
+                platform="slack",
+            )
+        self.assertIsInstance(result, dict)
+        assert isinstance(result, dict)
+        self.assertIn("web_search tool", result["context"])
+
+
+# ---------------------------------------------------------------------------
+# Pricing provider inference: Hermes' auth-provider config ("custom" for a
+# generic OpenAI-compatible endpoint) and the pricing module's billing-route
+# vocabulary ("openai") don't overlap -- config.yaml can't just say
+# provider: openai (hermes doctor rejects it, breaks live LLM calls). Real
+# per-token cost tracking depends on inferring the pricing route from
+# base_url instead, without touching the auth-provider config at all.
+# ---------------------------------------------------------------------------
+
+class PricingProviderInferenceTests(unittest.TestCase):
+    def test_custom_provider_with_openai_base_url_infers_openai(self) -> None:
+        self.assertEqual(
+            _infer_pricing_provider("custom", "https://api.openai.com/v1"), "openai"
+        )
+
+    def test_local_provider_with_openai_base_url_infers_openai(self) -> None:
+        self.assertEqual(
+            _infer_pricing_provider("local", "https://api.openai.com/v1"), "openai"
+        )
+
+    def test_empty_provider_with_openai_base_url_infers_openai(self) -> None:
+        self.assertEqual(_infer_pricing_provider("", "https://api.openai.com/v1"), "openai")
+
+    def test_custom_provider_with_non_openai_base_url_left_unchanged(self) -> None:
+        self.assertEqual(
+            _infer_pricing_provider("custom", "http://localhost:11434/v1"), "custom"
+        )
+
+    def test_distinct_real_provider_never_overridden(self) -> None:
+        """A provider that's already something billing-specific (not
+        "custom"/"local") must never be second-guessed, even against an
+        openai.com base_url -- that would be a real, deliberate config."""
+        self.assertEqual(
+            _infer_pricing_provider("anthropic", "https://api.openai.com/v1"), "anthropic"
+        )
+
+    def test_calc_cost_resolves_real_openai_pricing_via_custom_provider(self) -> None:
+        """End-to-end (no mocking of the pricing module itself): a
+        provider="custom" + base_url=api.openai.com call for gpt-4o-mini
+        must resolve to real, non-zero pricing -- this is the exact
+        configuration this fix targets."""
+        cost, status, _source = _calc_cost(
+            "gpt-4o-mini",
+            "custom",
+            "https://api.openai.com/v1",
+            {"input_tokens": 1_000_000, "output_tokens": 0},
+        )
+        self.assertEqual(status, "estimated")
+        self.assertAlmostEqual(cost, 0.15, places=5)
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +489,7 @@ class LlmObservationTests(unittest.TestCase):
         plugin._client.log = Mock()
         plugin._client.log_llm_event = Mock()
         plugin._client.log_execution_summary = Mock()
+        plugin._client.save_llm_trace = Mock()
         return plugin
 
     def _start_session(self, plugin: AmpGovernancePlugin, session_id: str, instance_id: str = "inst-1") -> None:
@@ -580,6 +759,227 @@ class LlmObservationTests(unittest.TestCase):
         self._start_session(plugin, "sess-1")
         plugin.on_session_finalize(session_id="sess-1", reason="done")
         self.assertIsNone(plugin._exec_contexts.get("sess-1"))  # still cleaned up
+
+
+class LlmTraceCaptureTests(unittest.TestCase):
+    """Covers pre_api_request prompt stashing and post_api_request's best-effort
+    save_llm_trace call -- the data AMP's "click LLM in the log" panel reads."""
+
+    def _make_plugin(self, llm_governance_enabled: bool = True) -> AmpGovernancePlugin:
+        plugin = AmpGovernancePlugin()
+        plugin._config = SimpleNamespace(
+            is_configured=True,
+            llm_governance_enabled=llm_governance_enabled,
+            notifications_enabled=False,
+            fail_closed=True,
+            agent_name="amp-test",
+            username="tester",
+        )
+        plugin._client.log = Mock()
+        plugin._client.log_llm_event = Mock()
+        plugin._client.save_llm_trace = Mock()
+        return plugin
+
+    def _start_session(self, plugin: AmpGovernancePlugin, session_id: str, instance_id: str = "inst-1") -> None:
+        plugin._exec_contexts.create(session_id, instance_id, model="claude-opus-4-8", platform="slack")
+
+    # -- pre_api_request stashing -----------------------------------------
+
+    def test_pre_api_request_stashes_prompt_by_request_id(self) -> None:
+        plugin = self._make_plugin()
+        plugin.pre_api_request(api_request_id="req-1", user_message="do the thing")
+        self.assertEqual(plugin._pending_prompts["req-1"], "do the thing")
+
+    def test_pre_api_request_noop_when_governance_disabled(self) -> None:
+        plugin = self._make_plugin(llm_governance_enabled=False)
+        plugin.pre_api_request(api_request_id="req-1", user_message="do the thing")
+        self.assertNotIn("req-1", plugin._pending_prompts)
+
+    def test_pre_api_request_noop_without_request_id(self) -> None:
+        plugin = self._make_plugin()
+        plugin.pre_api_request(api_request_id="", user_message="do the thing")
+        self.assertEqual(plugin._pending_prompts, {})
+
+    def test_pre_api_request_truncates_long_message(self) -> None:
+        plugin = self._make_plugin()
+        long_message = "x" * 5000
+        plugin.pre_api_request(api_request_id="req-1", user_message=long_message)
+        self.assertLessEqual(len(plugin._pending_prompts["req-1"]), _TRACE_FIELD_CHARS)
+
+    def test_pop_pending_prompt_removes_entry(self) -> None:
+        plugin = self._make_plugin()
+        plugin.pre_api_request(api_request_id="req-1", user_message="hello")
+        popped = plugin._pop_pending_prompt("req-1")
+        self.assertEqual(popped, "hello")
+        self.assertNotIn("req-1", plugin._pending_prompts)
+
+    def test_pop_pending_prompt_missing_returns_empty(self) -> None:
+        plugin = self._make_plugin()
+        self.assertEqual(plugin._pop_pending_prompt("no-such-request"), "")
+
+    # -- pre_api_request -> ExecutionContext provider/base_url capture -----
+    # (needed so _project_research_cost has real pricing inputs available
+    # *before* a same-turn tool call like amp_evaluate_research_plan
+    # dispatches -- post_api_request's accumulate step fires too late for
+    # that, since tool dispatch happens before usage is accumulated.)
+
+    def test_pre_api_request_captures_provider_and_base_url_on_exec_ctx(self) -> None:
+        plugin = self._make_plugin()
+        self._start_session(plugin, "sess-1")
+        plugin.pre_api_request(
+            api_request_id="req-1", user_message="hi", session_id="sess-1",
+            provider="custom", base_url="https://api.openai.com/v1",
+        )
+        exec_ctx = plugin._exec_contexts.get("sess-1")
+        self.assertEqual(exec_ctx.last_provider, "custom")
+        self.assertEqual(exec_ctx.last_base_url, "https://api.openai.com/v1")
+
+    def test_pre_api_request_no_exec_context_does_not_raise(self) -> None:
+        plugin = self._make_plugin()
+        plugin.pre_api_request(
+            api_request_id="req-1", user_message="hi", session_id="no-such-session",
+            provider="custom", base_url="https://api.openai.com/v1",
+        )  # must not raise
+
+    def test_pre_api_request_empty_provider_does_not_clear_existing_value(self) -> None:
+        plugin = self._make_plugin()
+        self._start_session(plugin, "sess-1")
+        exec_ctx = plugin._exec_contexts.get("sess-1")
+        exec_ctx.last_provider = "custom"
+        exec_ctx.last_base_url = "https://api.openai.com/v1"
+        plugin.pre_api_request(api_request_id="req-2", user_message="hi", session_id="sess-1")
+        self.assertEqual(exec_ctx.last_provider, "custom")
+        self.assertEqual(exec_ctx.last_base_url, "https://api.openai.com/v1")
+
+    # -- post_api_request -> save_llm_trace --------------------------------
+
+    def test_post_api_request_saves_trace_with_prompt_and_answer(self) -> None:
+        plugin = self._make_plugin()
+        self._start_session(plugin, "sess-1")
+        plugin.pre_api_request(api_request_id="req-1", user_message="run my research topics")
+        assistant_message = SimpleNamespace(content="Here is the report.", tool_calls=None)
+        plugin.post_api_request(
+            session_id="sess-1",
+            api_request_id="req-1",
+            model="gpt-4o-mini",
+            provider="openai",
+            usage={"input_tokens": 10, "output_tokens": 5},
+            assistant_message=assistant_message,
+        )
+        plugin._client.save_llm_trace.assert_called_once()
+        _, kwargs = plugin._client.save_llm_trace.call_args
+        self.assertEqual(kwargs["model"], "gpt-4o-mini")
+        self.assertEqual(kwargs["prompt"], {"user": "run my research topics"})
+        self.assertEqual(kwargs["answer"], "Here is the report.")
+        self.assertIsNone(kwargs["reasoning"])
+        self.assertIn("call_time", kwargs)
+
+    def test_post_api_request_answer_summarizes_tool_calls_when_content_empty(self) -> None:
+        plugin = self._make_plugin()
+        self._start_session(plugin, "sess-1")
+        tool_call = SimpleNamespace(
+            function=SimpleNamespace(name="web_search", arguments='{"query": "AI governance"}')
+        )
+        assistant_message = SimpleNamespace(content="", tool_calls=[tool_call])
+        plugin.post_api_request(
+            session_id="sess-1",
+            api_request_id="req-1",
+            model="gpt-4o-mini",
+            usage={"input_tokens": 10, "output_tokens": 5},
+            assistant_message=assistant_message,
+        )
+        kwargs = plugin._client.save_llm_trace.call_args.kwargs
+        self.assertIn("web_search", kwargs["answer"])
+        self.assertIn("AI governance", kwargs["answer"])
+
+    def test_post_api_request_no_prompt_when_nothing_stashed(self) -> None:
+        plugin = self._make_plugin()
+        self._start_session(plugin, "sess-1")
+        plugin.post_api_request(
+            session_id="sess-1",
+            api_request_id="req-never-stashed",
+            model="gpt-4o-mini",
+            usage={"input_tokens": 10, "output_tokens": 5},
+            assistant_message=SimpleNamespace(content="ok", tool_calls=None),
+        )
+        kwargs = plugin._client.save_llm_trace.call_args.kwargs
+        self.assertIsNone(kwargs["prompt"])
+
+    def test_post_api_request_extracts_reasoning_when_present(self) -> None:
+        plugin = self._make_plugin()
+        self._start_session(plugin, "sess-1")
+        assistant_message = SimpleNamespace(content="answer", tool_calls=None, reasoning="thought about it")
+        plugin.post_api_request(
+            session_id="sess-1",
+            api_request_id="req-1",
+            model="deepseek-r1",
+            usage={"input_tokens": 10, "output_tokens": 5},
+            assistant_message=assistant_message,
+        )
+        kwargs = plugin._client.save_llm_trace.call_args.kwargs
+        self.assertEqual(kwargs["reasoning"], "thought about it")
+
+    def test_save_llm_trace_failure_does_not_affect_accumulation(self) -> None:
+        """Regression: a broken trace save must never break Phase 2A accumulation."""
+        plugin = self._make_plugin()
+        plugin._client.save_llm_trace = Mock(side_effect=Exception("network down"))
+        self._start_session(plugin, "sess-1")
+        plugin.post_api_request(
+            session_id="sess-1",
+            api_request_id="req-1",
+            model="gpt-4o-mini",
+            usage={"input_tokens": 100, "output_tokens": 50},
+            assistant_message=SimpleNamespace(content="ok", tool_calls=None),
+        )
+        ctx = plugin._exec_contexts.get("sess-1")
+        self.assertEqual(ctx.input_tokens, 100)
+        self.assertEqual(ctx.llm_calls, 1)
+        plugin._client.log_llm_event.assert_called_once()  # unaffected by trace failure
+
+    def test_no_trace_saved_when_governance_disabled(self) -> None:
+        plugin = self._make_plugin(llm_governance_enabled=False)
+        self._start_session(plugin, "sess-1")
+        plugin.post_api_request(
+            session_id="sess-1",
+            api_request_id="req-1",
+            model="gpt-4o-mini",
+            usage={"input_tokens": 10, "output_tokens": 5},
+            assistant_message=SimpleNamespace(content="ok", tool_calls=None),
+        )
+        plugin._client.save_llm_trace.assert_not_called()
+
+
+class ReasoningExtractionHelperTests(unittest.TestCase):
+    """Unit tests for the module-level helpers directly, independent of the
+    plugin/hook machinery above."""
+
+    def test_none_assistant_message_returns_none(self) -> None:
+        self.assertIsNone(_extract_reasoning_from_assistant_message(None))
+
+    def test_no_reasoning_fields_returns_none(self) -> None:
+        msg = SimpleNamespace(content="just an answer")
+        self.assertIsNone(_extract_reasoning_from_assistant_message(msg))
+
+    def test_reasoning_content_field(self) -> None:
+        msg = SimpleNamespace(reasoning_content="step by step thinking")
+        self.assertEqual(_extract_reasoning_from_assistant_message(msg), "step by step thinking")
+
+    def test_reasoning_details_array_format(self) -> None:
+        msg = SimpleNamespace(
+            reasoning_details=[{"type": "reasoning.summary", "summary": "considered options"}]
+        )
+        self.assertEqual(_extract_reasoning_from_assistant_message(msg), "considered options")
+
+    def test_summarize_answer_prefers_content(self) -> None:
+        msg = SimpleNamespace(content="the final answer", tool_calls=[SimpleNamespace()])
+        self.assertEqual(_summarize_assistant_answer(msg), "the final answer")
+
+    def test_summarize_answer_empty_when_nothing_available(self) -> None:
+        msg = SimpleNamespace(content="", tool_calls=None)
+        self.assertEqual(_summarize_assistant_answer(msg), "")
+
+    def test_summarize_answer_none_message(self) -> None:
+        self.assertEqual(_summarize_assistant_answer(None), "")
 
 
 if __name__ == "__main__":

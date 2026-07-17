@@ -106,6 +106,12 @@ class ExecutionContext:
         self.llm_calls: int = 0
         self.tool_calls: int = 0
 
+        # Most recently observed provider/base_url for this session's LLM
+        # calls -- used to project research-plan cost from real pricing
+        # before any call has actually happened yet (see _project_research_cost).
+        self.last_provider: str = ""
+        self.last_base_url: str = ""
+
         # Phase 2B enforcement tracking
         self.approved_budget_usd: Optional[float] = None
         self.last_policy_eval_at: Optional[str] = None
@@ -114,6 +120,17 @@ class ExecutionContext:
         self.policy_eval_count: int = 0
         self.llm_hitl_approved: int = 0
         self.llm_blocked: int = 0
+
+        # Phase 3A plan governance: the most recently *submitted* plan's
+        # projected cost (set regardless of decision outcome) and a count of
+        # how many plans this session has had approved. Reported alongside
+        # approved_budget_usd in to_summary_dict() so amp_governance_summary
+        # is a single, fresh source for every number research-agent's step 8
+        # report needs -- nothing left for the model to recall from an
+        # earlier turn.
+        self.last_plan_projected_cost_usd: Optional[float] = None
+        self.last_plan_projected_cost_status: str = "unknown"
+        self.plan_approvals_count: int = 0
 
         self.llm_call_records: List[LlmCallRecord] = []
 
@@ -166,10 +183,14 @@ class ExecutionContext:
             "policy_eval_count": self.policy_eval_count,
             "llm_hitl_approved": self.llm_hitl_approved,
             "llm_blocked": self.llm_blocked,
+            "plan_approvals_count": self.plan_approvals_count,
             "status": self.status,
         }
         if self.approved_budget_usd is not None:
             d["approved_budget_usd"] = round(self.approved_budget_usd, 8)
+        if self.last_plan_projected_cost_usd is not None:
+            d["plan_projected_cost_usd"] = round(self.last_plan_projected_cost_usd, 8)
+            d["plan_projected_cost_status"] = self.last_plan_projected_cost_status
         return d
 
 

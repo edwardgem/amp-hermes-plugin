@@ -253,30 +253,39 @@ Phase 3B (below) builds on this interface with a working sample: a skill that de
 
 ## Research sample (Phase 3B)
 
-An end-to-end demo of everything above: a user sends a chat message, a skill loads their configured topics, proposes a plan, waits for AMP approval, researches only after approval, and reports back — with every LLM call along the way governed by Phase 2A/2B (see "Scope" above: this only works because the whole workflow runs as the model's own normal conversational turns, never via `ctx.llm`).
+An end-to-end demo of everything above: a user sends a chat message, a skill loads their configured topics (or a specific topic they named on the spot), proposes a plan, waits for AMP approval, researches only after approval, and reports back — with every LLM call along the way governed by Phase 2A/2B (see "Scope" above: this only works because the whole workflow runs as the model's own normal conversational turns, never via `ctx.llm`).
+
+Two ways to trigger it:
+- **Configured mode**: `Run my research topics.` — researches whatever's in your `research_topics.yaml`.
+- **Ad hoc mode**: `Research the US market.` (or any specific topic) — researches just that topic, using sensible defaults (`research_depth: standard`, `sources_per_topic: 5`, `lookback_days: 30`) since there's no config entry for a one-off request. Same plan-approval → research → report pipeline either way; only the topic source differs.
 
 **Quick start:**
 1. Install and enable the AMP Hermes plugin (see Install options below).
-2. Copy `examples/research_topics.yaml` to `~/.hermes/research_topics.yaml` and edit the topics (1-5 topics).
+2. Copy `examples/research_topics.yaml` to `~/.hermes/research_topics.yaml` and edit the topics (1-5 topics) — needed for configured mode; ad hoc mode doesn't require this file at all.
 3. Configure AMP credentials and an eval-policy for this agent (Steps 2-5 below).
-4. Copy or symlink `skills-pointer/amp-research/` into `~/.hermes/skills/research/amp-research/` (see "Pointer skill installation" below — this step is currently manual).
+4. Copy or symlink `skills-pointer/amp-research/` into `~/.hermes/skills/research/amp-research/`, and `skills-pointer/amp-research-topic/` into `~/.hermes/skills/research/amp-research-topic/` (see "Pointer skill installation" below — this step is currently manual).
 5. Restart the Hermes gateway.
-6. Send `Run my research topics.` through a Hermes channel.
+6. Send `Run my research topics.` (configured mode) or `Research <your topic>.` (ad hoc mode) through a Hermes channel.
 7. Review any required approval in AMP (HITL happens only in AMP's UI; your Hermes channel only receives status notifications, never an approval prompt itself).
 8. Receive the completed report, with a real governance/usage summary, through Hermes.
 
 **Three registered tools** (`ctx.register_tool()`, wired in `register()`, not listed under `plugin.yaml`'s `hooks:` since tools are a separate registration API):
-- `amp_evaluate_research_plan({"plan": {...}})` — thin wrapper around `evaluate_proposed_plan()` above. Sources `session_id` from `gateway.session_context.get_session_env("HERMES_SESSION_ID", "")` (the same pattern the notification bridge already uses for platform/chat/thread) rather than trusting the model to supply one.
-- `amp_load_research_topics({"path": "..."})` — validates `~/.hermes/research_topics.yaml` (or an override path) via `research_config.load_research_topics()`: 1-5 topics required, defaults applied for `research_depth`/`sources_per_topic`/`lookback_days`. Exists so config loading is deterministic Python, not the model hand-parsing YAML.
+- `amp_evaluate_research_plan({"plan": {...}})` — thin wrapper around `evaluate_proposed_plan()` above. Sources `session_id` from `gateway.session_context.get_session_env("HERMES_SESSION_ID", "")` (the same pattern the notification bridge already uses for platform/chat/thread) rather than trusting the model to supply one. Used identically by both configured and ad hoc mode — AHP has no concept of "mode," it only ever sees a plan dict.
+- `amp_load_research_topics({"path": "..."})` — validates `~/.hermes/research_topics.yaml` (or an override path) via `research_config.load_research_topics()`: 1-5 topics required, defaults applied for `research_depth`/`sources_per_topic`/`lookback_days`. Exists so config loading is deterministic Python, not the model hand-parsing YAML. Called only in configured mode — ad hoc mode skips it entirely (see the skill's step 0).
 - `amp_governance_summary()` — returns the session's current `ExecutionContext.to_summary_dict()` (cost, tokens, call counts) so the skill's final report uses real numbers instead of inventing them. Returns `{"status": "no_context"}` if nothing has been tracked yet.
 
-**Two skills:**
-- `skills/research-agent/SKILL.md` — plugin-bundled (`ctx.register_skill()`), the actual step-by-step workflow. Plugin-bundled skills are **not** auto-listed in the system prompt's skill index (they're opt-in explicit loads only), so this alone isn't discoverable by natural language.
-- `skills-pointer/amp-research/SKILL.md` — a few lines, **not** plugin-bundled (must be installed to `~/.hermes/skills/`), so it *is* auto-indexed and matches natural-language requests like "Run my research topics." Its entire body is: call `skill_view(name="amp-governance:research-agent")` and follow it. There is deliberately no separate `ctx.register_command()` for this — a plugin-registered command's return value is sent directly as the reply and cannot hand off to the model's multi-turn loop (verified against `gateway/run.py`), so it couldn't have driven this workflow anyway. Natural language alone is the supported entry point; Hermes' per-skill slash-command derivation (`agent/skill_commands.py`) technically also gives this skill a `/amp-research` command, but on Slack specifically that name is intercepted by Slack's own reserved `/` namespace before it ever reaches Hermes (confirmed live — Slack rejects it client-side unless separately registered as a native Slack Slash Command, out of scope here), so it isn't a reliable cross-platform entry point and isn't documented as one.
+**Three skills:**
+- `skills/research-agent/SKILL.md` — plugin-bundled (`ctx.register_skill()`), the actual step-by-step workflow, shared by both modes. Step 0 determines which mode a given trigger is (configured vs ad hoc) and branches accordingly; everything from plan-building onward (steps 2-8) is identical regardless of mode. Plugin-bundled skills are **not** auto-listed in the system prompt's skill index (they're opt-in explicit loads only), so this alone isn't discoverable by natural language.
+- `skills-pointer/amp-research/SKILL.md` — configured-mode entry point, matches phrasing like "Run my research topics."
+- `skills-pointer/amp-research-topic/SKILL.md` — ad hoc-mode entry point, matches phrasing like "Research the US market." Deliberately a **separate** pointer skill rather than one pointer covering both cases — two narrowly-scoped skill descriptions give the LLM-mediated routing (see below) a much cleaner signal than one description trying to cover two different intents, which is exactly the kind of ambiguity that produced flaky routing in earlier testing.
 
-**Pointer skill installation (known Phase 4 UX friction):** the pointer skill currently requires a manual copy/symlink into `~/.hermes/skills/research/amp-research/`, same as this plugin's own manual install (Option A/B below). There's no existing Hermes API this cycle found for a plugin to auto-place a *non-bundled, auto-indexed* skill into the user-local skill tree — plugin-bundled skills are deliberately excluded from that index (see Phase 3A `evaluate_proposed_plan`'s doc above), which is exactly why this second, separately-installed file exists at all. Automating this is left for Phase 4.
+Neither pointer skill is plugin-bundled (both must be installed to `~/.hermes/skills/`), so both *are* auto-indexed and matched by natural language. Their entire body is: call `skill_view(name="amp-governance:research-agent")` and follow it. There is deliberately no separate `ctx.register_command()` for either — a plugin-registered command's return value is sent directly as the reply and cannot hand off to the model's multi-turn loop (verified against `gateway/run.py`), so it couldn't have driven this workflow anyway. Natural language alone is the supported entry point; Hermes' per-skill slash-command derivation (`agent/skill_commands.py`) technically also gives each of these a `/amp-research` / `/amp-research-topic` command, but on Slack specifically that name is intercepted by Slack's own reserved `/` namespace before it ever reaches Hermes (confirmed live — Slack rejects it client-side unless separately registered as a native Slack Slash Command, out of scope here), so it isn't a reliable cross-platform entry point and isn't documented as one.
 
-**Not implemented this cycle:** cron scheduling (see `hermes cron create ... --skills "amp-governance:research-agent"` in `HERMES_RESEARCH_SAMPLE_INTEGRATION_ASSESSMENT.md` §5 for the verified path once someone wants it), topic-management UI, plan revision loops, multiple report formats.
+**Pointer skill installation (known Phase 4 UX friction):** both pointer skills currently require a manual copy/symlink into `~/.hermes/skills/research/`, same as this plugin's own manual install (Option A/B below). There's no existing Hermes API this cycle found for a plugin to auto-place a *non-bundled, auto-indexed* skill into the user-local skill tree — plugin-bundled skills are deliberately excluded from that index (see Phase 3A `evaluate_proposed_plan`'s doc above), which is exactly why these separately-installed files exist at all. Automating this is left for Phase 4.
+
+**Testing this workflow end-to-end:** `scripts/e2e_research_test.py adhoc|configured|freshness|all` drives a real `hermes chat` turn for each mode, auto-approves any AMP plan-approval workitem via the same API AHP itself uses (`X-API-Key` from `~/.hermes/.env`, no browser/Slack needed), and cross-checks the result against `~/.hermes/state.db` — catches wrong-skill routing, a missing/invented plan cost, a governance summary that doesn't match what actually happened, and (via the `freshness` scenario) a plain time-sensitive question getting wrongly diverted into the governed workflow instead of a direct `web_search`. Makes real LLM calls (small real cost per run); not part of `pytest tests/`. Run with the hermes-agent venv (`.../hermes-agent/venv/bin/python`, for `pyyaml`).
+
+**Not implemented this cycle:** cron scheduling (see `hermes cron create ... --skills "amp-governance:research-agent"` in `HERMES_RESEARCH_SAMPLE_INTEGRATION_ASSESSMENT.md` §5 for the verified path once someone wants it), topic-management UI, plan revision loops, multiple report formats, ad hoc topics longer than 5 (silently capped, see the skill's step 0), a `plan_type` distinction between the two modes (both submit `plan_type: "research"` — deliberately kept as a skill-instruction-only distinction, not a governance-signal one, for this cycle).
 
 ## Prerequisites
 
@@ -360,7 +369,7 @@ mkdir -p ~/.hermes/plugins
 ln -s /path/to/amp-hermes-plugin ~/.hermes/plugins/amp-governance
 ```
 
-Either option only installs the plugin itself — the `skills-pointer/amp-research/` skill is deliberately **not** included above, since it must live outside the plugin directory to be auto-discoverable. See "Research sample (Phase 3B)" above for that separate step.
+Either option only installs the plugin itself — the `skills-pointer/amp-research/` and `skills-pointer/amp-research-topic/` skills are deliberately **not** included above, since they must live outside the plugin directory to be auto-discoverable. See "Research sample (Phase 3B)" above for that separate step.
 
 ## Step 1 — enable the plugin
 
@@ -551,6 +560,26 @@ Check:
 - AMP workitems page for pending approvals
 - `HERMES_AGENT_TIMEOUT` — if HITL reviews take more than 30 minutes, set this to a higher value (e.g., `HERMES_AGENT_TIMEOUT=7200`)
 
+### Research skill (Phase 3B) stops triggering, or abandons governance mid-run
+
+Symptoms: a message that should trigger the research workflow instead gets a
+direct, ungoverned answer; or the workflow starts but `amp_evaluate_research_plan`
+fails repeatedly and the model falls back to a raw `web_search`/reports a vague
+"internal configuration issue" instead of stopping cleanly.
+
+This is a known failure mode in a **long-running channel/thread**, not a config
+problem: the model can anchor on a stale plan shape, topic list, or approval
+from earlier in that same conversation instead of following the current skill
+instructions, even right after re-loading them. It gets more likely the longer
+a thread has been open and the more it has already gone through this workflow.
+
+Fix: start a fresh Hermes session in that channel rather than continuing the
+existing thread — a new session has no prior turns to anchor on. In Slack,
+send `/new` (or `/hermes new` if `/new` isn't registered as a native Slack
+slash command in your workspace — see `hermes slack manifest` in the upstream
+Hermes docs to register core commands like `/new` natively). The equivalent
+command on other platforms is also `/new`.
+
 ### Notifications are not appearing in my channel
 
 Check:
@@ -592,8 +621,8 @@ For local dev, use the `feature/llm-execution-blocking` branch of the Hermes rep
 - `session_store.py` — session-to-AMP instance tracking
 - `research_config.py` — research_topics.yaml loading/validation (Phase 3B)
 - `skills/research-agent/SKILL.md` — plugin-bundled research workflow (Phase 3B)
-- `skills-pointer/amp-research/SKILL.md` — small discoverable pointer skill; install separately to `~/.hermes/skills/` (Phase 3B)
-- `examples/research_topics.yaml`, `examples/research_planning_prompt.md` — template config and planning prompt read by the research-agent skill at runtime
+- `skills-pointer/amp-research/SKILL.md`, `skills-pointer/amp-research-topic/SKILL.md` — small discoverable pointer skills (configured mode, ad hoc mode); install separately to `~/.hermes/skills/` (Phase 3B)
+- `examples/research_topics.yaml` — template config read by the research-agent skill at runtime (the planning-prompt schema is inlined in the skill itself)
 - `.env.example` — example environment variables for setup
 - `LICENSE` — MIT open-source license
 

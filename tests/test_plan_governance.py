@@ -140,6 +140,19 @@ class DecisionOutcomeTests(unittest.TestCase):
         self.assertIsNotNone(exec_ctx)
         self.assertAlmostEqual(exec_ctx.approved_budget_usd, 4.75, places=5)
 
+    def test_auto_approved_notifies_user_no_review_was_needed(self):
+        plugin = _make_plugin()
+        plugin._client.request_plan_approval = Mock(return_value=_allow_response())
+        with patch.object(plugin, "_ensure_instance", return_value="inst-1"), \
+             patch.object(plugin, "_safe_log"):
+            plugin.evaluate_proposed_plan("s", _valid_plan(projected_cost_usd=4.75))
+
+        plugin._notify_user.assert_called_once()
+        message = plugin._notify_user.call_args.args[0]
+        self.assertIn("no human review", message.lower())
+        self.assertIn("researching now", message.lower())
+        self.assertIn("$4.75", message)
+
     def test_hitl_approved_sets_budget(self):
         plugin = _make_plugin()
         plugin._client.request_plan_approval = Mock(return_value=_hitl_response())
@@ -337,6 +350,74 @@ class AmpNormalizationTests(unittest.TestCase):
 
         self.assertEqual(captured["context"]["payload"], research_payload)
 
+    def test_save_llm_trace_payload_shape(self):
+        from hermes.amp_client import AmpClient
+        from hermes.config import AmpConfig
+
+        config = AmpConfig(
+            backend_url="https://amp.example.com",
+            api_key="k", org_id="O-1", agent_name="hermes-test",
+            username="u", hitl_timeout_minutes=10,
+            hitl_poll_interval_seconds=3, fail_closed=True,
+            notifications_enabled=True,
+            llm_governance_enabled=True, llm_governance_mode="observe",
+            llm_governance_fail_closed=False,
+            llm_governance_include_subagents=True,
+        )
+        client = AmpClient(config)
+        captured = {}
+        captured_path = {}
+
+        def fake_request(method, path, payload=None, query=None):
+            captured.update(payload or {})
+            captured_path["path"] = path
+
+        with patch.object(client, "_request", side_effect=fake_request):
+            client.save_llm_trace(
+                "inst-1",
+                call_time="2026-07-16T04:17:24+00:00",
+                model="gpt-4o-mini",
+                prompt={"user": "run my research topics"},
+                reasoning=None,
+                answer="Called: web_search(...)",
+            )
+
+        self.assertEqual(captured_path["path"], "/api/agents/inst-1/llm_trace")
+        self.assertEqual(captured["call_time"], "2026-07-16T04:17:24+00:00")
+        self.assertEqual(captured["model"], "gpt-4o-mini")
+        self.assertEqual(captured["prompt"], {"user": "run my research topics"})
+        self.assertEqual(captured["answer"], "Called: web_search(...)")
+        self.assertNotIn("reasoning", captured)  # None -> omitted, not sent as null
+        self.assertNotIn("trace_id", captured)
+
+    def test_save_llm_trace_includes_reasoning_when_present(self):
+        from hermes.amp_client import AmpClient
+        from hermes.config import AmpConfig
+
+        config = AmpConfig(
+            backend_url="https://amp.example.com",
+            api_key="k", org_id="O-1", agent_name="a",
+            username="u", hitl_timeout_minutes=10,
+            hitl_poll_interval_seconds=3, fail_closed=True,
+            notifications_enabled=True,
+            llm_governance_enabled=True, llm_governance_mode="observe",
+            llm_governance_fail_closed=False,
+            llm_governance_include_subagents=True,
+        )
+        client = AmpClient(config)
+        captured = {}
+
+        with patch.object(
+            client, "_request",
+            side_effect=lambda m, p, payload=None, query=None: captured.update(payload or {}),
+        ):
+            client.save_llm_trace(
+                "inst-1", call_time="2026-07-16T04:17:24+00:00", model="deepseek-r1",
+                reasoning="considered several approaches",
+            )
+
+        self.assertEqual(captured["reasoning"], "considered several approaches")
+
 
 # ---------------------------------------------------------------------------
 # 5. Public module-level entry point
@@ -377,6 +458,47 @@ class RegressionTests(unittest.TestCase):
         )
         self.assertEqual(result, "resp")
         next_call.assert_called_once_with({})
+
+
+class LogPrefixTests(unittest.TestCase):
+    """AmpClient.log() is the single choke point all AHP logging goes
+    through (_safe_log, log_llm_event, log_execution_summary all call it),
+    so prefixing there covers every AHP-issued log line uniformly."""
+
+    def _client(self):
+        from hermes.amp_client import AmpClient
+        from hermes.config import AmpConfig
+        config = AmpConfig(
+            backend_url="https://amp.example.com",
+            api_key="k", org_id="O-1", agent_name="a",
+            username="u", hitl_timeout_minutes=10,
+            hitl_poll_interval_seconds=3, fail_closed=True,
+            notifications_enabled=True,
+            llm_governance_enabled=True, llm_governance_mode="enforce",
+            llm_governance_fail_closed=False,
+            llm_governance_include_subagents=True,
+        )
+        return AmpClient(config)
+
+    def test_log_prefixes_message_with_ahp(self):
+        client = self._client()
+        captured = {}
+        with patch.object(
+            client, "_request",
+            side_effect=lambda m, p, payload=None, query=None: captured.update(payload or {}),
+        ):
+            client.log("inst-1", "Plan submitted | plan_id=abc")
+        self.assertEqual(captured["message"], "[AHP] Plan submitted | plan_id=abc")
+
+    def test_log_llm_event_message_is_prefixed(self):
+        client = self._client()
+        captured = {}
+        with patch.object(
+            client, "_request",
+            side_effect=lambda m, p, payload=None, query=None: captured.update(payload or {}),
+        ):
+            client.log_llm_event("inst-1", {"api_call_number": 1, "model": "m", "total_tokens": 100})
+        self.assertTrue(captured["message"].startswith("[AHP] "))
 
 
 if __name__ == "__main__":
