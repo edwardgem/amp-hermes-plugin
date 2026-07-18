@@ -2,17 +2,184 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-AMP governance plugin for Hermes.
+This plugin is a **reference implementation** to show how to quickly add AMP governance to an existing Hermes agent. Two pieces, each installable in one command:
 
-This plugin connects a Hermes agent to AMP so AMP can:
+- **The plugin itself** — governs every tool call and (optionally) every LLM call Hermes makes: logging, policy evaluation, HITL approval, blocking.
+- **A sample research-agent skill** — a working example of *cost-governed* agent behavior, not just tool allow/block: it proposes a plan with a real projected cost (and token count), gets it approved by AMP, only then spends tokens researching, and reports back with real usage numbers.
 
-- log prompts and governed tool activity
-- evaluate tool calls against an AMP `eval-policy`
-- require HITL approval when the policy says so
-- block governed actions when AMP rejects them
-- add date-aware routing context for time-sensitive prompts so Hermes is more likely to use `web_search` for current information
-- send governance notifications back to the originating channel on any platform
-- observe and record LLM token usage and estimated cost per session (opt-in)
+If you already run Hermes, you can have both running in a few minutes.
+
+## Quickstart
+
+**1. Prerequisites**
+- Hermes installed and running, with a working chat channel (Slack, Telegram, Discord, etc.)
+- An AMP account at `https://amp.inquiryon.com` (or your own AMP instance)
+
+**2. Register your Hermes agent in AMP** — one-time, in the AMP UI:
+1. Log in to AMP → **Agent Launchpad** → register a new remote agent for Hermes (name/describe it so AMP AI can suggest a relevant policy) → check **Allow auto-start** → **Register**.
+2. Create an AMP API key if you don't already have one.
+3. On your agent's page, under **Governance** → **Write New Policy** → **eval-policy** → use the AI icon to generate a starter Hermes policy → activate it.
+
+You now have `AMP_API_KEY` and `AMP_AGENT_NAME`. Find `AMP_ORG_ID` and `AMP_USERNAME` under **My Profile**.
+
+**3. Install the plugin** — one command:
+
+```bash
+hermes plugins install edwardgem/amp-hermes-plugin --enable
+```
+
+**4. Add your AMP credentials** to `~/.hermes/.env`:
+
+```env
+AMP_BACKEND_URL=https://amp.inquiryon.com
+AMP_USERNAME=your_name@email_domain.com
+AMP_API_KEY=amp_k_...
+AMP_ORG_ID=O-0011-AB202605010...
+AMP_AGENT_NAME=your-hermes-agent-10c8
+```
+
+(Optional settings — HITL timeouts, LLM cost enforcement, notifications — are covered in [LLM budget enforcement](#llm-budget-enforcement-phase-2b) below. Defaults are sane; you don't need them to try this out.)
+
+**5. Install the research-agent skills** — one command each. This is the part that demonstrates token/cost governance, not just tool-call governance:
+
+```bash
+hermes skills install https://raw.githubusercontent.com/edwardgem/amp-hermes-plugin/main/skills-pointer/amp-research/SKILL.md
+hermes skills install https://raw.githubusercontent.com/edwardgem/amp-hermes-plugin/main/skills-pointer/amp-research-topic/SKILL.md
+```
+
+Then copy `~/.hermes/plugins/amp-governance/examples/research_topics.yaml` to `~/.hermes/research_topics.yaml` and edit the topics list. This is only needed for "run my configured topics" mode — ad hoc topics named on the spot (e.g. "research the US market") don't need this file at all.
+
+**6. Restart Hermes:**
+
+```bash
+hermes gateway restart
+```
+
+**7. Try it** — send these through your Hermes channel:
+- `Can you run git status in ~/Projects/my-repo?` — a plain governed tool call.
+- `Research the US market today.` — the full governed research workflow: a cost-estimated plan, AMP approval, governed research, and a real cost/usage summary in the report.
+
+See "How to verify it is working" below to confirm each piece is genuinely governed, not just running.
+
+## How to verify it is working
+
+Check these places:
+
+- Hermes gateway logs
+- Hermes chat surface (Slack, Telegram, Discord, etc.)
+- AMP agent log for the Hermes agent
+- AMP workitems page if HITL is triggered
+
+You should see AMP entries similar to:
+
+- session started
+- user prompt logged
+- policy check for a normalized tool/action
+- policy decision
+- HITL requested, if approval is required
+
+For time-sensitive prompts, you should also see Hermes use `web_search` instead of answering only from model memory.
+
+For HITL prompts in any messaging channel, you should also see messages similar to:
+
+- `[AMP] AMP is waiting for a human reviewer to approve "web_search" before continuing. This action is paused pending review.`
+- `[AMP] AMP review approved "web_search". Continuing now.`
+- `[AMP] AMP reviewer rejected "web_search". ...`
+
+If LLM observation is enabled, you should also see in AMP logs:
+
+- `LLM call #1 | model=claude-opus-4-8 | tokens=1450 | cost_usd=0.001234 | cost_status=estimated`
+- `Execution summary | execution_id=... | llm_calls=4 | total_tokens=5820 | total_cost_usd=0.004932 | cost_status=estimated`
+
+## Common issues
+
+### Plugin loads but does nothing
+
+Check:
+
+- `plugin.yaml` is present in `~/.hermes/plugins/amp-governance`
+- `__init__.py` is present in the same directory
+- the plugin is enabled:
+
+```bash
+hermes plugins enable amp-governance
+```
+
+### Hermes starts but AMP governance is not configured
+
+Check that `~/.hermes/.env` contains all required values:
+
+- `AMP_BACKEND_URL`
+- `AMP_API_KEY`
+- `AMP_ORG_ID`
+- `AMP_USERNAME`
+- `AMP_AGENT_NAME`
+
+### Tool calls are blocked unexpectedly
+
+Check:
+
+- the active AMP policy for your Hermes agent
+- whether the Hermes tool was normalized into a different AMP tool/action than you expected
+- whether AMP policy criteria are too broad
+
+### HITL never resolves
+
+Check:
+
+- reviewer assignment in the AMP policy or HITL setup
+- `AMP_HITL_TIMEOUT_MINUTES`
+- AMP workitems page for pending approvals
+- `HERMES_AGENT_TIMEOUT` — if HITL reviews take more than 30 minutes, set this to a higher value (e.g., `HERMES_AGENT_TIMEOUT=7200`)
+
+### Research skill (Phase 3B) stops triggering, or abandons governance mid-run
+
+Symptoms: a message that should trigger the research workflow instead gets a
+direct, ungoverned answer; or the workflow starts but `amp_evaluate_research_plan`
+fails repeatedly and the model falls back to a raw `web_search`/reports a vague
+"internal configuration issue" instead of stopping cleanly.
+
+This is a known failure mode in a **long-running channel/thread**, not a config
+problem: the model can anchor on a stale plan shape, topic list, or approval
+from earlier in that same conversation instead of following the current skill
+instructions, even right after re-loading them. It gets more likely the longer
+a thread has been open and the more it has already gone through this workflow.
+
+Fix: start a fresh Hermes session in that channel rather than continuing the
+existing thread — a new session has no prior turns to anchor on. In Slack,
+send `/new` (or `/hermes new` if `/new` isn't registered as a native Slack
+slash command in your workspace — see `hermes slack manifest` in the upstream
+Hermes docs to register core commands like `/new` natively). The equivalent
+command on other platforms is also `/new`.
+
+### Notifications are not appearing in my channel
+
+Check:
+
+- `AMP_NOTIFICATIONS_ENABLED` is `true` (default)
+- Hermes gateway is running with a platform adapter (Slack bot token, Telegram bot token, etc.)
+- `HERMES_SESSION_PLATFORM` is set correctly in the gateway for your channel
+- The `send_message` tool is enabled and working in your Hermes setup
+
+### LLM observation shows cost_status="unknown"
+
+This is expected for:
+- Local models (Ollama, LM Studio, etc.) that are not in Hermes' pricing table
+- New models released after the Hermes pricing table was last updated
+- Providers where Hermes cannot determine the model name
+
+The session continues normally. Token counts are still recorded; only the cost calculation is unavailable.
+
+### LLM enforcement is configured but not activating
+
+Check:
+
+- `AMP_LLM_GOVERNANCE_ENABLED=true` and `AMP_LLM_GOVERNANCE_MODE=enforce` are set
+- The installed Hermes build includes `LLMExecutionBlocked` ([hermes-agent#64662](https://github.com/nousresearch/hermes-agent/issues/64662))
+- Hermes gateway logs at startup for the message `"LLM enforcement enabled"`
+- If the log shows `"Enforcement middleware was NOT registered"`, you need a Hermes build that includes the upstream change
+
+For local dev, use the `feature/llm-execution-blocking` branch of the Hermes repo.
 
 ## What this plugin governs
 
@@ -253,21 +420,11 @@ Phase 3B (below) builds on this interface with a working sample: a skill that de
 
 ## Research sample (Phase 3B)
 
-An end-to-end demo of everything above: a user sends a chat message, a skill loads their configured topics (or a specific topic they named on the spot), proposes a plan, waits for AMP approval, researches only after approval, and reports back — with every LLM call along the way governed by Phase 2A/2B (see "Scope" above: this only works because the whole workflow runs as the model's own normal conversational turns, never via `ctx.llm`).
+An end-to-end demo of everything above: a user sends a chat message, a skill loads their configured topics (or a specific topic they named on the spot), proposes a plan, waits for AMP approval, researches only after approval, and reports back — with every LLM call along the way governed by Phase 2A/2B (see "Scope" above: this only works because the whole workflow runs as the model's own normal conversational turns, never via `ctx.llm`). Install steps are in the top-level Quickstart; this section covers how it works.
 
 Two ways to trigger it:
 - **Configured mode**: `Run my research topics.` — researches whatever's in your `research_topics.yaml`.
 - **Ad hoc mode**: `Research the US market.` (or any specific topic) — researches just that topic, using sensible defaults (`research_depth: standard`, `sources_per_topic: 5`, `lookback_days: 30`) since there's no config entry for a one-off request. Same plan-approval → research → report pipeline either way; only the topic source differs.
-
-**Quick start:**
-1. Install and enable the AMP Hermes plugin (see Install options below).
-2. Copy `examples/research_topics.yaml` to `~/.hermes/research_topics.yaml` and edit the topics (1-5 topics) — needed for configured mode; ad hoc mode doesn't require this file at all.
-3. Configure AMP credentials and an eval-policy for this agent (Steps 2-5 below).
-4. Copy or symlink `skills-pointer/amp-research/` into `~/.hermes/skills/research/amp-research/`, and `skills-pointer/amp-research-topic/` into `~/.hermes/skills/research/amp-research-topic/` (see "Pointer skill installation" below — this step is currently manual).
-5. Restart the Hermes gateway.
-6. Send `Run my research topics.` (configured mode) or `Research <your topic>.` (ad hoc mode) through a Hermes channel.
-7. Review any required approval in AMP (HITL happens only in AMP's UI; your Hermes channel only receives status notifications, never an approval prompt itself).
-8. Receive the completed report, with a real governance/usage summary, through Hermes.
 
 **Three registered tools** (`ctx.register_tool()`, wired in `register()`, not listed under `plugin.yaml`'s `hooks:` since tools are a separate registration API):
 - `amp_evaluate_research_plan({"plan": {...}})` — thin wrapper around `evaluate_proposed_plan()` above. Sources `session_id` from `gateway.session_context.get_session_env("HERMES_SESSION_ID", "")` (the same pattern the notification bridge already uses for platform/chat/thread) rather than trusting the model to supply one. Used identically by both configured and ad hoc mode — AHP has no concept of "mode," it only ever sees a plan dict.
@@ -277,337 +434,15 @@ Two ways to trigger it:
 **Three skills:**
 - `skills/research-agent/SKILL.md` — plugin-bundled (`ctx.register_skill()`), the actual step-by-step workflow, shared by both modes. Step 0 determines which mode a given trigger is (configured vs ad hoc) and branches accordingly; everything from plan-building onward (steps 2-8) is identical regardless of mode. Plugin-bundled skills are **not** auto-listed in the system prompt's skill index (they're opt-in explicit loads only), so this alone isn't discoverable by natural language.
 - `skills-pointer/amp-research/SKILL.md` — configured-mode entry point, matches phrasing like "Run my research topics."
-- `skills-pointer/amp-research-topic/SKILL.md` — ad hoc-mode entry point, matches phrasing like "Research the US market." Deliberately a **separate** pointer skill rather than one pointer covering both cases — two narrowly-scoped skill descriptions give the LLM-mediated routing (see below) a much cleaner signal than one description trying to cover two different intents, which is exactly the kind of ambiguity that produced flaky routing in earlier testing.
+- `skills-pointer/amp-research-topic/SKILL.md` — ad hoc-mode entry point, matches phrasing like "Research the US market." Deliberately a **separate** pointer skill rather than one pointer covering both cases — two narrowly-scoped skill descriptions give the LLM-mediated routing a much cleaner signal than one description trying to cover two different intents, which is exactly the kind of ambiguity that produced flaky routing in earlier testing. In practice, AHP's own `pre_llm_call` hook now routes straight to the real skill and decides the mode itself whenever a message mentions "research," so these pointer skills mainly matter as the natural-language-discoverable entry point when that hook isn't the one driving (e.g. a direct `skill_view` call).
 
-Neither pointer skill is plugin-bundled (both must be installed to `~/.hermes/skills/`), so both *are* auto-indexed and matched by natural language. Their entire body is: call `skill_view(name="amp-governance:research-agent")` and follow it. There is deliberately no separate `ctx.register_command()` for either — a plugin-registered command's return value is sent directly as the reply and cannot hand off to the model's multi-turn loop (verified against `gateway/run.py`), so it couldn't have driven this workflow anyway. Natural language alone is the supported entry point; Hermes' per-skill slash-command derivation (`agent/skill_commands.py`) technically also gives each of these a `/amp-research` / `/amp-research-topic` command, but on Slack specifically that name is intercepted by Slack's own reserved `/` namespace before it ever reaches Hermes (confirmed live — Slack rejects it client-side unless separately registered as a native Slack Slash Command, out of scope here), so it isn't a reliable cross-platform entry point and isn't documented as one.
+Neither pointer skill is plugin-bundled (both must be installed to `~/.hermes/skills/`, see Quickstart), so both *are* auto-indexed and matched by natural language. Their entire body is: call `skill_view(name="amp-governance:research-agent")` and follow it. There is deliberately no separate `ctx.register_command()` for either — a plugin-registered command's return value is sent directly as the reply and cannot hand off to the model's multi-turn loop (verified against `gateway/run.py`), so it couldn't have driven this workflow anyway. Natural language alone is the supported entry point; Hermes' per-skill slash-command derivation (`agent/skill_commands.py`) technically also gives each of these a `/amp-research` / `/amp-research-topic` command, but on Slack specifically that name is intercepted by Slack's own reserved `/` namespace before it ever reaches Hermes (confirmed live — Slack rejects it client-side unless separately registered as a native Slack Slash Command, out of scope here), so it isn't a reliable cross-platform entry point and isn't documented as one.
 
-**Pointer skill installation (known Phase 4 UX friction):** both pointer skills currently require a manual copy/symlink into `~/.hermes/skills/research/`, same as this plugin's own manual install (Option A/B below). There's no existing Hermes API this cycle found for a plugin to auto-place a *non-bundled, auto-indexed* skill into the user-local skill tree — plugin-bundled skills are deliberately excluded from that index (see Phase 3A `evaluate_proposed_plan`'s doc above), which is exactly why these separately-installed files exist at all. Automating this is left for Phase 4.
+**Pointer skill installation:** previously a manual copy/symlink step into `~/.hermes/skills/research/`. Now a one-liner per skill via `hermes skills install <URL-to-SKILL.md>` (see Quickstart) — Hermes' own skill installer accepts a direct HTTPS URL to a `SKILL.md` file, which resolves this cleanly for a human running setup. A plugin still cannot auto-place a *non-bundled, auto-indexed* skill into the user-local skill tree on the user's behalf with zero commands at install time (plugin-bundled skills are deliberately excluded from that index — see Phase 3A `evaluate_proposed_plan`'s doc above); that narrower gap remains open if it matters to you.
 
 **Testing this workflow end-to-end:** `scripts/e2e_research_test.py adhoc|configured|freshness|all` drives a real `hermes chat` turn for each mode, auto-approves any AMP plan-approval workitem via the same API AHP itself uses (`X-API-Key` from `~/.hermes/.env`, no browser/Slack needed), and cross-checks the result against `~/.hermes/state.db` — catches wrong-skill routing, a missing/invented plan cost, a governance summary that doesn't match what actually happened, and (via the `freshness` scenario) a plain time-sensitive question getting wrongly diverted into the governed workflow instead of a direct `web_search`. Makes real LLM calls (small real cost per run); not part of `pytest tests/`. Run with the hermes-agent venv (`.../hermes-agent/venv/bin/python`, for `pyyaml`).
 
 **Not implemented this cycle:** cron scheduling (see `hermes cron create ... --skills "amp-governance:research-agent"` in `HERMES_RESEARCH_SAMPLE_INTEGRATION_ASSESSMENT.md` §5 for the verified path once someone wants it), topic-management UI, plan revision loops, multiple report formats, ad hoc topics longer than 5 (silently capped, see the skill's step 0), a `plan_type` distinction between the two modes (both submit `plan_type: "research"` — deliberately kept as a skill-instruction-only distinction, not a governance-signal one, for this cycle).
-
-## Prerequisites
-
-Before installing this plugin, make sure you already have:
-
-- Hermes installed and running on your machine
-- a working Hermes channel or chat surface, such as Slack, Telegram, or Discord
-- an AMP environment available, such as:
-  - `https://amp.inquiryon.com`, or
-  - a local AMP dev instance
-- an AMP agent created for Hermes
-- the following AMP values:
-  - `AMP_BACKEND_URL`
-  - `AMP_API_KEY`
-  - `AMP_ORG_ID`
-  - `AMP_AGENT_NAME`
-  - `AMP_USERNAME`
-
-## Files you need from this repo
-
-Create one plugin folder under your Hermes home:
-
-- default Hermes home: `~/.hermes`
-- plugin folder: `~/.hermes/plugins/amp-governance`
-
-Copy these files from this repo into that folder:
-
-- `plugin.yaml`
-- `__init__.py`
-- `amp_client.py`
-- `config.py`
-- `execution_context.py`
-- `notification.py`
-- `policy.py`
-- `session_store.py`
-
-The final layout should look like this:
-
-```text
-~/.hermes/
-  plugins/
-    amp-governance/
-      plugin.yaml
-      __init__.py
-      amp_client.py
-      config.py
-      execution_context.py
-      notification.py
-      policy.py
-      session_store.py
-```
-
-## Install options
-
-### Option A — copy files
-
-Use this when you want a normal local install from a downloaded repo snapshot.
-
-```bash
-mkdir -p ~/.hermes/plugins/amp-governance
-
-cp /path/to/amp-hermes-plugin/plugin.yaml ~/.hermes/plugins/amp-governance/
-cp /path/to/amp-hermes-plugin/__init__.py ~/.hermes/plugins/amp-governance/
-cp /path/to/amp-hermes-plugin/amp_client.py ~/.hermes/plugins/amp-governance/
-cp /path/to/amp-hermes-plugin/config.py ~/.hermes/plugins/amp-governance/
-cp /path/to/amp-hermes-plugin/execution_context.py ~/.hermes/plugins/amp-governance/
-cp /path/to/amp-hermes-plugin/notification.py ~/.hermes/plugins/amp-governance/
-cp /path/to/amp-hermes-plugin/policy.py ~/.hermes/plugins/amp-governance/
-cp /path/to/amp-hermes-plugin/session_store.py ~/.hermes/plugins/amp-governance/
-cp /path/to/amp-hermes-plugin/research_config.py ~/.hermes/plugins/amp-governance/
-cp -r /path/to/amp-hermes-plugin/skills ~/.hermes/plugins/amp-governance/
-cp -r /path/to/amp-hermes-plugin/examples ~/.hermes/plugins/amp-governance/
-```
-
-### Option B — symlink the repo
-
-Use this when you are developing the plugin locally and want edits to take effect from the repo.
-
-```bash
-mkdir -p ~/.hermes/plugins
-ln -s /path/to/amp-hermes-plugin ~/.hermes/plugins/amp-governance
-```
-
-Either option only installs the plugin itself — the `skills-pointer/amp-research/` and `skills-pointer/amp-research-topic/` skills are deliberately **not** included above, since they must live outside the plugin directory to be auto-discoverable. See "Research sample (Phase 3B)" above for that separate step.
-
-## Step 1 — enable the plugin
-
-Before configuring AMP governance, first install Hermes in your environment and verify that Hermes is working correctly. Once Hermes is running successfully, enable this plugin:
-
-```bash
-hermes plugins enable amp-governance
-```
-
-## Step 2 — register your Hermes agent in AMP
-
-Before this plugin can govern Hermes, your Hermes agent must be registered in AMP.
-
-If you are using AMP UI:
-
-1. Create a user account at amp.inquiryon.com if you haven't done so.
-2. Login to AMP (amp.inquiryon.com).
-3. Go to **Agent Launchpad**
-4. Create / register a new remote agent for Hermes.
-5. Use a name or put in a description that relates to Hermes so that AMP AI can help you select a relevant policy.
-6. Select **Allow auto-start** at the Registration popup.
-7. Click **Register**
-8. Create an AMP API Key if you do not have one.
-9. Copy the generated values for:
-   - `AMP_API_KEY`
-   - `AMP_AGENT_NAME`
-
-## Step 3 — add AMP settings to Hermes
-
-Copy `.env.example` into your Hermes home as `~/.hermes/.env`, then fill in your real AMP values:
-
-```env
-AMP_BACKEND_URL=https://amp.inquiryon.com
-AMP_USERNAME=your_name@email_domain.com
-AMP_API_KEY=amp_k_...
-AMP_ORG_ID=O-0011-AB202605010...
-AMP_AGENT_NAME=your-hermes-agent-10c8
-```
-
-You can find your username and org_id in **My Profile** on the side menu in AMP.
-
-Optional settings:
-
-```env
-# HITL behavior
-AMP_HITL_TIMEOUT_MINUTES=10
-AMP_HITL_POLL_INTERVAL_SECONDS=3
-AMP_FAIL_CLOSED=true
-
-# Notification bridge (default: on)
-AMP_NOTIFICATIONS_ENABLED=true
-
-# LLM usage observation and enforcement (default: off)
-AMP_LLM_GOVERNANCE_ENABLED=false
-# "observe" = token/cost accumulation only; "enforce" = pre-call policy eval + block
-AMP_LLM_GOVERNANCE_MODE=observe
-# fail-open by default: allow LLM calls if AMP is unreachable (false=fail-open)
-AMP_LLM_GOVERNANCE_FAIL_CLOSED=false
-AMP_LLM_GOVERNANCE_INCLUDE_SUBAGENTS=true
-```
-
-Notes:
-
-- `AGENT_NAME` is accepted as a fallback alias for `AMP_AGENT_NAME`
-- `AMP_FAIL_CLOSED=true` is recommended for governance-focused deployments
-- `AMP_NOTIFICATIONS_ENABLED=true` is the default; notifications go to whatever channel the user is in
-- `AMP_LLM_GOVERNANCE_ENABLED=false` is the default; set to `true` to enable token/cost observation and enforcement
-- `AMP_LLM_GOVERNANCE_MODE=enforce` requires Hermes with `LLMExecutionBlocked` ([hermes-agent#64662](https://github.com/nousresearch/hermes-agent/issues/64662))
-- if you use a custom Hermes home, set `HERMES_HOME` and place `.env` under that directory
-- for long HITL reviews (> 30 min), set `HERMES_AGENT_TIMEOUT=7200` to prevent the gateway from killing the waiting session
-
-## Step 4 — restart Hermes gateway
-
-Run:
-
-```bash
-hermes gateway restart
-```
-
-If the gateway is not running yet, start it the way you normally run Hermes.
-
-## Step 5 — create or install an AMP eval policy
-
-This plugin expects your Hermes AMP agent to have an active `eval-policy`.
-
-At minimum, that policy should define rules for the normalized tool/action pairs listed above.
-
-If you are using AMP UI:
-
-1. Login to amp.inquiryon.com
-2. Go to **Agent Launchpad**.
-3. Open your Hermes agent created above by clicking on its tile.
-4. On the side menu, under **Governance**, choose **Write New Policy**.
-5. Choose **eval-policy**.
-6. Click on the AI icon on the page and use AI to help suggest a Hermes policy sample.
-7. Create and activate the policy by following the screen instruction.
-
-## Step 6 — test the integration
-
-Send a simple prompt to Hermes that should use a governed tool.
-
-Examples:
-
-- `Can you run git status in ~/Projects/my-repo?`
-- `Can you read ~/Projects/my-repo/README.md?`
-- `Can you search for files named policy.json under ~/Projects/agents/?`
-- `How did the US market perform today?`
-- `Please perform a web search for the latest news about social security fraud in the US.`
-
-Expected behavior:
-
-- AMP should log the Hermes session and tool activity
-- safe actions should proceed normally
-- time-sensitive or explicitly live-information prompts should be routed toward `web_search` using injected current-date context
-- blocked actions should return:
-  - `This request is blocked by AMP governance. No action was taken.`
-- HITL actions should pause until a reviewer approves or rejects them in AMP
-- when Hermes is running in a messaging surface (Slack, Telegram, Discord, etc.), the plugin posts a channel message when AMP is waiting for review and another message when the review is resolved
-
-## How to verify it is working
-
-Check these places:
-
-- Hermes gateway logs
-- Hermes chat surface (Slack, Telegram, Discord, etc.)
-- AMP agent log for the Hermes agent
-- AMP workitems page if HITL is triggered
-
-You should see AMP entries similar to:
-
-- session started
-- user prompt logged
-- policy check for a normalized tool/action
-- policy decision
-- HITL requested, if approval is required
-
-For time-sensitive prompts, you should also see Hermes use `web_search` instead of answering only from model memory.
-
-For HITL prompts in any messaging channel, you should also see messages similar to:
-
-- `[AMP] AMP is waiting for a human reviewer to approve "web_search" before continuing. This action is paused pending review.`
-- `[AMP] AMP review approved "web_search". Continuing now.`
-- `[AMP] AMP reviewer rejected "web_search". ...`
-
-If LLM observation is enabled, you should also see in AMP logs:
-
-- `LLM call #1 | model=claude-opus-4-8 | tokens=1450 | cost_usd=0.001234 | cost_status=estimated`
-- `Execution summary | execution_id=... | llm_calls=4 | total_tokens=5820 | total_cost_usd=0.004932 | cost_status=estimated`
-
-## Common issues
-
-### Plugin loads but does nothing
-
-Check:
-
-- `plugin.yaml` is present in `~/.hermes/plugins/amp-governance`
-- `__init__.py` is present in the same directory
-- the plugin is enabled:
-
-```bash
-hermes plugins enable amp-governance
-```
-
-### Hermes starts but AMP governance is not configured
-
-Check that `~/.hermes/.env` contains all required values:
-
-- `AMP_BACKEND_URL`
-- `AMP_API_KEY`
-- `AMP_ORG_ID`
-- `AMP_USERNAME`
-- `AMP_AGENT_NAME`
-
-### Tool calls are blocked unexpectedly
-
-Check:
-
-- the active AMP policy for your Hermes agent
-- whether the Hermes tool was normalized into a different AMP tool/action than you expected
-- whether AMP policy criteria are too broad
-
-### HITL never resolves
-
-Check:
-
-- reviewer assignment in the AMP policy or HITL setup
-- `AMP_HITL_TIMEOUT_MINUTES`
-- AMP workitems page for pending approvals
-- `HERMES_AGENT_TIMEOUT` — if HITL reviews take more than 30 minutes, set this to a higher value (e.g., `HERMES_AGENT_TIMEOUT=7200`)
-
-### Research skill (Phase 3B) stops triggering, or abandons governance mid-run
-
-Symptoms: a message that should trigger the research workflow instead gets a
-direct, ungoverned answer; or the workflow starts but `amp_evaluate_research_plan`
-fails repeatedly and the model falls back to a raw `web_search`/reports a vague
-"internal configuration issue" instead of stopping cleanly.
-
-This is a known failure mode in a **long-running channel/thread**, not a config
-problem: the model can anchor on a stale plan shape, topic list, or approval
-from earlier in that same conversation instead of following the current skill
-instructions, even right after re-loading them. It gets more likely the longer
-a thread has been open and the more it has already gone through this workflow.
-
-Fix: start a fresh Hermes session in that channel rather than continuing the
-existing thread — a new session has no prior turns to anchor on. In Slack,
-send `/new` (or `/hermes new` if `/new` isn't registered as a native Slack
-slash command in your workspace — see `hermes slack manifest` in the upstream
-Hermes docs to register core commands like `/new` natively). The equivalent
-command on other platforms is also `/new`.
-
-### Notifications are not appearing in my channel
-
-Check:
-
-- `AMP_NOTIFICATIONS_ENABLED` is `true` (default)
-- Hermes gateway is running with a platform adapter (Slack bot token, Telegram bot token, etc.)
-- `HERMES_SESSION_PLATFORM` is set correctly in the gateway for your channel
-- The `send_message` tool is enabled and working in your Hermes setup
-
-### LLM observation shows cost_status="unknown"
-
-This is expected for:
-- Local models (Ollama, LM Studio, etc.) that are not in Hermes' pricing table
-- New models released after the Hermes pricing table was last updated
-- Providers where Hermes cannot determine the model name
-
-The session continues normally. Token counts are still recorded; only the cost calculation is unavailable.
-
-### LLM enforcement is configured but not activating
-
-Check:
-
-- `AMP_LLM_GOVERNANCE_ENABLED=true` and `AMP_LLM_GOVERNANCE_MODE=enforce` are set
-- The installed Hermes build includes `LLMExecutionBlocked` ([hermes-agent#64662](https://github.com/nousresearch/hermes-agent/issues/64662))
-- Hermes gateway logs at startup for the message `"LLM enforcement enabled"`
-- If the log shows `"Enforcement middleware was NOT registered"`, you need a Hermes build that includes the upstream change
-
-For local dev, use the `feature/llm-execution-blocking` branch of the Hermes repo.
 
 ## Files in this plugin
 
@@ -621,29 +456,18 @@ For local dev, use the `feature/llm-execution-blocking` branch of the Hermes rep
 - `session_store.py` — session-to-AMP instance tracking
 - `research_config.py` — research_topics.yaml loading/validation (Phase 3B)
 - `skills/research-agent/SKILL.md` — plugin-bundled research workflow (Phase 3B)
-- `skills-pointer/amp-research/SKILL.md`, `skills-pointer/amp-research-topic/SKILL.md` — small discoverable pointer skills (configured mode, ad hoc mode); install separately to `~/.hermes/skills/` (Phase 3B)
+- `skills-pointer/amp-research/SKILL.md`, `skills-pointer/amp-research-topic/SKILL.md` — small discoverable pointer skills (configured mode, ad hoc mode); install via `hermes skills install <URL>` (Phase 3B, see Quickstart)
 - `examples/research_topics.yaml` — template config read by the research-agent skill at runtime (the planning-prompt schema is inlined in the skill itself)
+- `scripts/e2e_research_test.py` — end-to-end test harness for the research workflow (see Phase 3B above)
 - `.env.example` — example environment variables for setup
 - `LICENSE` — MIT open-source license
 
-## Recommended first setup path
-
-If you are setting this up for the first time, follow this order:
-
-1. install Hermes and confirm your chat channel works
-2. copy this plugin into `~/.hermes/plugins/amp-governance`
-3. enable the plugin
-4. create a Hermes agent in AMP
-5. add AMP variables to `~/.hermes/.env`
-6. restart Hermes gateway
-7. activate an AMP `eval-policy` for the Hermes agent
-8. test one safe command and one HITL-triggering command
-
 ## Development note
 
-For local development, symlink install is easier because Hermes will load the plugin directly from your working repo:
+For local development, symlink install is easier than `hermes plugins install` because Hermes will load the plugin directly from your working repo, and edits take effect on the next gateway restart with no reinstall step:
 
 ```bash
+mkdir -p ~/.hermes/plugins
 ln -s /path/to/amp-hermes-plugin ~/.hermes/plugins/amp-governance
 hermes plugins enable amp-governance
 hermes gateway restart
