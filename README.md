@@ -38,7 +38,7 @@ AMP_ORG_ID=O-0011-AB202605010...
 AMP_AGENT_NAME=your-hermes-agent-10c8
 ```
 
-(Optional settings — HITL timeouts, LLM cost enforcement, notifications — are covered in [LLM budget enforcement](#llm-budget-enforcement-phase-2b) below. Defaults are sane; you don't need them to try this out.)
+That's all you need — LLM token/cost observation (`AMP_LLM_GOVERNANCE_MODE=observe`) is **on by default** in this reference implementation, since it's what powers the research skill's cost-estimated plan and usage summary in step 7 below. Set `AMP_LLM_GOVERNANCE_ENABLED=false` if you only want tool-call governance and no per-LLM-call logging to AMP. Other optional settings — HITL timeouts, notifications, `enforce` mode — are covered in [LLM budget enforcement](#llm-budget-enforcement-phase-2b) below.
 
 **5. Install the research-agent skills** — one command each. This is the part that demonstrates token/cost governance, not just tool-call governance:
 
@@ -86,7 +86,7 @@ For HITL prompts in any messaging channel, you should also see messages similar 
 - `[AMP] AMP review approved "web_search". Continuing now.`
 - `[AMP] AMP reviewer rejected "web_search". ...`
 
-If LLM observation is enabled, you should also see in AMP logs:
+If LLM observation is enabled (default), you should also see in AMP logs:
 
 - `LLM call #1 | model=claude-opus-4-8 | tokens=1450 | cost_usd=0.001234 | cost_status=estimated`
 - `Execution summary | execution_id=... | llm_calls=4 | total_tokens=5820 | total_cost_usd=0.004932 | cost_status=estimated`
@@ -334,8 +334,9 @@ This setting applies only to AMP unavailability and unexpected AMP responses. Ex
 **Configuration:**
 
 ```dotenv
-# Off by default. Set to true to enable LLM observation and enforcement.
-AMP_LLM_GOVERNANCE_ENABLED=false
+# On by default in this reference implementation. Set to false to disable
+# LLM observation/enforcement entirely and use tool-call governance only.
+AMP_LLM_GOVERNANCE_ENABLED=true
 
 # Mode: "observe" (accumulate only) or "enforce" (pre-call policy eval + block).
 # "enforce" requires Hermes with LLMExecutionBlocked (hermes-agent#64662).

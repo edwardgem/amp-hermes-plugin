@@ -104,7 +104,7 @@ def load_config() -> AmpConfig:
     api_key = _env_value("AMP_API_KEY", env_file)
     org_id = _env_value("AMP_ORG_ID", env_file)
     username = _env_value("AMP_USERNAME", env_file)
-    agent_name = _env_value("AMP_AGENT_NAME", env_file, "AGENT_NAME")
+    agent_name = _env_value("AMP_AGENT_NAME", env_file)
     llm_governance_mode_raw = _env_value("AMP_LLM_GOVERNANCE_MODE", env_file).strip().lower()
     llm_governance_mode = llm_governance_mode_raw if llm_governance_mode_raw in {"observe", "enforce"} else "observe"
     return AmpConfig(
@@ -126,7 +126,7 @@ def load_config() -> AmpConfig:
         ),
         fail_closed=_bool_value(env_file, True, "AMP_FAIL_CLOSED"),
         notifications_enabled=_bool_value(env_file, True, "AMP_NOTIFICATIONS_ENABLED"),
-        llm_governance_enabled=_bool_value(env_file, False, "AMP_LLM_GOVERNANCE_ENABLED"),
+        llm_governance_enabled=_bool_value(env_file, True, "AMP_LLM_GOVERNANCE_ENABLED"),
         llm_governance_mode=llm_governance_mode,
         llm_governance_fail_closed=_bool_value(env_file, False, "AMP_LLM_GOVERNANCE_FAIL_CLOSED"),
         llm_governance_include_subagents=_bool_value(env_file, True, "AMP_LLM_GOVERNANCE_INCLUDE_SUBAGENTS"),
