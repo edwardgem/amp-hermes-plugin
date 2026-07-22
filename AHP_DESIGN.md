@@ -1027,6 +1027,21 @@ If the provider does not return usage (e.g., some Ollama models, custom servers)
 
 Separate implementation (not in AHP). Uses Phase 3A plan governance interface.
 
+### Phase 4 - AHP Launch Polish
+
+Once the Hermes upstream improvement at GitHub is released and merged into AHP, we will revisit the below items for AHP launch readiness. This should be done before AMP SaaS release on Aug 31, 2026.
+
+* Pointer skill installation
+* Agent Log richness
+* Demo walkthrough
+* Screen recording
+* First-run experience
+* README refinements
+* Automatic installation opportunities
+* Governance summary presentation
+* Cron documentation
+* Manual end-to-end validation
+
 ---
 
 ## 16. File-by-File Implementation Plan
