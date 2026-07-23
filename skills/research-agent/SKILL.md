@@ -150,10 +150,10 @@ returns `status: "no_context"`, omit the section entirely.
 
 ## 8. Final response
 
-Your one and only reply to the user, in this shape. Use the "Current UTC
-date" given at the start of this turn's routing context for `<today's date>`
-and for every recency judgment in steps 2/5 — never your own belief about
-what today is, which will be wrong.
+Your one and only reply to the user must use exactly this structure, but do
+not include code fences. Use the "Current UTC date" given at the start of this
+turn's routing context for `<today's date>` and for every recency judgment in
+steps 2/5 — never your own belief about what today is, which will be wrong.
 
 This shape is Slack-formatted, not a plain-text block — this skill is used
 from Slack, so send it as a normal Slack message with no surrounding code
@@ -165,7 +165,6 @@ is the Governance summary block: paste it exactly as `report_text` returns
 it, with no reformatting — its own plain layout is intentional and must
 stay verbatim (see step 7).
 
-```
 *Research report — <today's date>*
 
 *Topics researched:* <list>
@@ -180,4 +179,3 @@ stay verbatim (see step 7).
 <one bare URL per line>
 
 <report_text from step 7, pasted verbatim, unformatted>
-```
