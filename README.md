@@ -206,6 +206,27 @@ Hermes tools are normalized into AMP policy vocabulary like this:
 - `patch` → `write/edit`
 - `web_search` → `exec/web_search`
 
+## AMP API Reference
+
+The sections above describe AHP's governance *behavior*; this section maps that behavior onto the concrete AMP API calls behind it — useful if you're building your own AMP integration and want the underlying HTTP contract, not just what AHP does with it.
+
+AHP is a thin, direct consumer of AMP's REST API — `X-API-Key`-authenticated HTTP calls, no SDK. It uses 6 endpoints:
+
+| Purpose | Endpoint | Called from |
+|---|---|---|
+| Start a governed session | `POST /api/agent/init` | `AmpClient.init_instance()` |
+| Policy evaluation + HITL request (tool call, LLM call, or plan) | `POST /api/hitl/request` | `AmpClient.request_hitl()`, `request_llm_hitl()`, `request_plan_approval()` |
+| Poll for the reviewer's decision | `GET /api/hitl/get-decision` | `AmpClient.get_hitl_decision()` |
+| Write a transparency log line | `POST /api/log` | `AmpClient.log()` |
+| Save an LLM call's prompt/reasoning/answer | `POST /api/agents/{instance_id}/llm_trace` | `AmpClient.save_llm_trace()` |
+| Signal a lifecycle state transition | `POST /api/agent/setState` | `AmpClient.set_state()` |
+
+**Call sequence:** `init` once at session start → `hitl/request` before each governed action → poll `hitl/get-decision` until resolved → `log` around the action → `setState` at session end. `llm_trace` is saved alongside each LLM call, independent of this sequence.
+
+Request/response payload shapes for `/api/hitl/request` are detailed where they're used: LLM budget governance in [Budget Enforcement](#budget-enforcement) below, plan governance in [Plan Approval Interface](#plan-approval-interface), and tool-call governance uses the same endpoint with the `tool`/`action` pair from [Tool Normalization](#tool-normalization) above. `amp_client.py` is the source of truth for exact request bodies.
+
+**Polling, not callback:** `/api/hitl/request` also accepts an optional `callback` field so AMP can push the decision to a reachable URL instead of being polled for it. AHP doesn't use it: a Hermes agent typically runs on a developer's laptop or behind a private network with no public URL for AMP to call back to, so AHP always polls `/api/hitl/get-decision` instead. If your own integration runs somewhere with a stable public endpoint, the callback path removes the need to poll.
+
 ## Runtime Governance
 
 This section explains what runtime LLM instrumentation covers, and what it doesn't — read it before "LLM Observation" and "Budget Enforcement" below.
