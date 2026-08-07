@@ -62,7 +62,7 @@ Alternatively, log in to AMP → **Agent Launchpad** → register a new **remote
 
 **2. Create (or use) an AMP API Key** — open the side menu → **Settings** to copy an existing API key or create a new one.
 
-**3. Attach a governance policy** — on the **Agent Launchpad** page, open your registered agent. On the side menu, under **Governance** → **Write New Policy** → **eval-policy** → use the AI icon to generate a starter Hermes policy → activate it.
+**3. Attach a governance policy** — on the **Agent Launchpad** page, open your registered agent. On the side menu, under **Governance** → **Write New Policy** → **Rule-based Policy** (also called eval-policy) → use the AI icon to generate a starter Hermes policy → activate it.
 
 You now have `AMP_API_KEY` and `AMP_AGENT_NAME`. Find `AMP_ORG_ID` and `AMP_USERNAME` under **My Profile**. Remember them for Step 5.
 
@@ -415,7 +415,7 @@ result = evaluate_proposed_plan(
 }
 ```
 
-These flat fields are promoted to policy `params` automatically, so an AMP eval-policy criterion can reference them directly, e.g. auto-approve when `plan_projected_cost_usd < 5.0`, otherwise require HITL.
+These flat fields are promoted to policy `params` automatically, so an AMP Rule-based Policy criterion can reference them directly, e.g. auto-approve when `plan_projected_cost_usd < 5.0`, otherwise require HITL.
 
 **Decision outcomes:**
 
