@@ -227,6 +227,8 @@ Request/response payload shapes for `/api/hitl/request` are detailed where they'
 
 **Polling, not callback:** `/api/hitl/request` also accepts an optional `callback` field so AMP can push the decision to a reachable URL instead of being polled for it. AHP doesn't use it: a Hermes agent typically runs on a developer's laptop or behind a private network with no public URL for AMP to call back to, so AHP always polls `/api/hitl/get-decision` instead. If your own integration runs somewhere with a stable public endpoint, the callback path removes the need to poll.
 
+**`notify` (not currently set by AHP):** `/api/hitl/request` also accepts an optional `hitl.notify` array (e.g. `["email"]`) — AMP sends an email alert to the reviewer when the workitem is created, so they don't have to be actively watching AMP or waiting on a poll result elsewhere. AHP doesn't set this today (`amp_client.py`'s `hitl` object omits it), but it's a straightforward addition to `request_hitl()`/`request_llm_hitl()`/`request_plan_approval()` if you want reviewers alerted by email. This is a request-body field the caller sets directly — unlike `who`/`what`/`where`, it is not resolved from a policy's `hitl_spec`.
+
 ## Runtime Governance
 
 This section explains what runtime LLM instrumentation covers, and what it doesn't — read it before "LLM Observation" and "Budget Enforcement" below.
