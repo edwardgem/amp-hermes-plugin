@@ -26,7 +26,7 @@ Don't have `amp-community` set up yet? Go to the
 follow its README to get an instance running.
 
 Once it's up and running, follow
-**[`examples/oss/README.md`](examples/oss/README.md)** to import the
+**[`plugins/oss/README.md`](plugins/oss/README.md)** to import the
 shared policy and pick one of the two ready-to-run example plugins (one
 using raw REST calls, one using the `amp-sdk-python` typed client).
 Continue there.

@@ -98,10 +98,10 @@ You now have `AMP_API_KEY` and `AMP_AGENT_NAME`. Find `AMP_ORG_ID` and
 run one command:
 
 ```bash
-hermes plugins install inquiryon/amp-hermes-plugin/examples/saas --enable
+hermes plugins install inquiryon/amp-hermes-plugin/plugins/saas --enable
 ```
 
-This clones the repo, installs the `examples/saas/` subdirectory as the
+This clones the repo, installs the `plugins/saas/` subdirectory as the
 `amp-governance` plugin, and enables it in one step.
 
 <details>
@@ -113,7 +113,7 @@ snapshot:
 ```bash
 mkdir -p ~/.hermes/plugins/amp-governance
 
-cp -r /path/to/amp-hermes-plugin/examples/saas/* ~/.hermes/plugins/amp-governance/
+cp -r /path/to/amp-hermes-plugin/plugins/saas/* ~/.hermes/plugins/amp-governance/
 
 hermes plugins enable amp-governance
 ```
@@ -125,7 +125,7 @@ Use symlink instead if you're developing the plugin locally — see
 
 **5. Configure environment variables** — add your AMP credentials to
 `~/.hermes/.env` (or wherever your Hermes install directory is). Copy
-`examples/saas/.env.example` as a starting point:
+`plugins/saas/.env.example` as a starting point:
 
 ```env
 AMP_BACKEND_URL=https://amp.inquiryon.com
@@ -212,8 +212,8 @@ The research-agent skill demonstrates:
 **Install the research-agent skills** — one command each:
 
 ```bash
-hermes skills install https://raw.githubusercontent.com/inquiryon/amp-hermes-plugin/main/examples/saas/skills-pointer/amp-research/SKILL.md
-hermes skills install https://raw.githubusercontent.com/inquiryon/amp-hermes-plugin/main/examples/saas/skills-pointer/amp-research-topic/SKILL.md
+hermes skills install https://raw.githubusercontent.com/inquiryon/amp-hermes-plugin/main/plugins/saas/skills-pointer/amp-research/SKILL.md
+hermes skills install https://raw.githubusercontent.com/inquiryon/amp-hermes-plugin/main/plugins/saas/skills-pointer/amp-research-topic/SKILL.md
 ```
 
 Then copy `~/.hermes/plugins/amp-governance/examples/research_topics.yaml`
@@ -638,20 +638,20 @@ For local dev, use the `feature/llm-execution-blocking` branch of the Hermes rep
 
 ### Files in this plugin
 
-- `examples/saas/plugin.yaml` — Hermes plugin manifest
-- `examples/saas/__init__.py` — main plugin hooks and governance flow
-- `examples/saas/amp_client.py` — AMP API client
-- `examples/saas/config.py` — config loading from `~/.hermes/.env`
-- `examples/saas/execution_context.py` — per-session LLM usage accumulation
-- `examples/saas/notification.py` — platform-neutral notification bridge
-- `examples/saas/policy.py` — Hermes tool normalization into AMP policy vocabulary
-- `examples/saas/session_store.py` — session-to-AMP instance tracking
-- `examples/saas/research_config.py` — research_topics.yaml loading/validation
-- `examples/saas/skills/research-agent/SKILL.md` — plugin-bundled research workflow
-- `examples/saas/skills-pointer/amp-research/SKILL.md`, `examples/saas/skills-pointer/amp-research-topic/SKILL.md` — small discoverable pointer skills (configured mode, ad hoc mode); install via `hermes skills install <URL>` (see [Advanced Example: Govern LLM Budget Usage](#advanced-example-govern-llm-budget-usage))
-- `examples/saas/examples/research_topics.yaml` — template config read by the research-agent skill at runtime (the planning-prompt schema is inlined in the skill itself)
-- `examples/saas/scripts/e2e_research_test.py` — end-to-end test harness for the research workflow (see [Research Example](#research-example) above)
-- `examples/saas/.env.example` — example environment variables for setup
+- `plugins/saas/plugin.yaml` — Hermes plugin manifest
+- `plugins/saas/__init__.py` — main plugin hooks and governance flow
+- `plugins/saas/amp_client.py` — AMP API client
+- `plugins/saas/config.py` — config loading from `~/.hermes/.env`
+- `plugins/saas/execution_context.py` — per-session LLM usage accumulation
+- `plugins/saas/notification.py` — platform-neutral notification bridge
+- `plugins/saas/policy.py` — Hermes tool normalization into AMP policy vocabulary
+- `plugins/saas/session_store.py` — session-to-AMP instance tracking
+- `plugins/saas/research_config.py` — research_topics.yaml loading/validation
+- `plugins/saas/skills/research-agent/SKILL.md` — plugin-bundled research workflow
+- `plugins/saas/skills-pointer/amp-research/SKILL.md`, `plugins/saas/skills-pointer/amp-research-topic/SKILL.md` — small discoverable pointer skills (configured mode, ad hoc mode); install via `hermes skills install <URL>` (see [Advanced Example: Govern LLM Budget Usage](#advanced-example-govern-llm-budget-usage))
+- `plugins/saas/examples/research_topics.yaml` — template config read by the research-agent skill at runtime (the planning-prompt schema is inlined in the skill itself)
+- `plugins/saas/scripts/e2e_research_test.py` — end-to-end test harness for the research workflow (see [Research Example](#research-example) above)
+- `plugins/saas/.env.example` — example environment variables for setup
 - `LICENSE` — MIT open-source license
 
 ### Local Development
@@ -663,7 +663,7 @@ reinstall step:
 
 ```bash
 mkdir -p ~/.hermes/plugins
-ln -s /path/to/amp-hermes-plugin/examples/saas ~/.hermes/plugins/amp-governance
+ln -s /path/to/amp-hermes-plugin/plugins/saas ~/.hermes/plugins/amp-governance
 hermes plugins enable amp-governance
 hermes gateway restart
 ```

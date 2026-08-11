@@ -1,9 +1,9 @@
 # Governing Hermes through amp-community (OSS)
 
-The plugin at the repo root (`../../`) governs Hermes tool calls through
-**AMP's SaaS backend**. This directory shows the same governance pattern
-— intercept a tool call, ask AMP for a decision, block or allow — against
-a **self-hosted [`amp-community`](https://github.com/inquiryon/amp-community)**
+[`../saas/`](../saas/) governs Hermes tool calls through **AMP's SaaS
+backend**. This directory shows the same governance pattern — intercept
+a tool call, ask AMP for a decision, block or allow — against a
+**self-hosted [`amp-community`](https://github.com/inquiryon/amp-community)**
 instance instead.
 
 There are two independent, complete example plugins here, and three
@@ -20,7 +20,7 @@ at; each example's own README covers only what's different about it
 | | [`rest/`](rest/) | [`sdk-python/`](sdk-python/) |
 |---|---|---|
 | Talks to | `amp-community`'s `/api/v0/...` REST API | same API, via [`amp-sdk-python`](https://github.com/inquiryon/amp-sdk-python) |
-| Dependencies | none (stdlib `urllib`, matches the root plugin's own style) | `inquiryon-amp-sdk` |
+| Dependencies | none (stdlib `urllib`, matches the SaaS plugin's own style) | `inquiryon-amp-sdk` |
 | Good for | any language reference, zero-dependency governance components | typed client, built-in retries/idempotency |
 
 Both govern the same four representative Hermes tools (`terminal`,
