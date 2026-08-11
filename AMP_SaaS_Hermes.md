@@ -117,7 +117,11 @@ hermes plugins enable amp-governance
 
 Before this plugin can govern Hermes, your Hermes agent must be registered in AMP.
 
-If you are using AMP UI:
+> **Tip:** Use the **AMP Quick Start** wizard in the AMP UI to auto-complete
+> registration, API key creation, and policy attachment in one guided flow
+> (recommended) — it does everything Steps 2 and 5 below cover manually.
+
+If you'd rather do it manually, or aren't using AMP UI:
 
 1. Create a user account at amp.inquiryon.com if you haven't done so.
 2. Login to AMP (amp.inquiryon.com).
@@ -171,6 +175,9 @@ If the gateway is not running yet, start it the way you normally run Hermes.
 ## Step 5 — create or install an AMP eval policy
 
 This plugin expects your Hermes AMP agent to have an active `eval-policy`.
+
+Already used the **AMP Quick Start** wizard in Step 2? It attaches a
+starter policy for you — skip this step and go to Step 6.
 
 At minimum, that policy should define rules for the normalized tool/action pairs listed above.
 
