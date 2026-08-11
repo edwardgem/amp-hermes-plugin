@@ -88,4 +88,13 @@ def normalize_tool_call(tool_name: str, args: Any) -> Optional[NormalizedAction]
             context={"query": query},
         )
 
+    if tool_name == "web_extract":
+        urls = args.get("urls")
+        return NormalizedAction(
+            raw_tool_name=tool_name,
+            tool="exec",
+            action="web_extract",
+            context={"urls": urls if isinstance(urls, list) else []},
+        )
+
     return None

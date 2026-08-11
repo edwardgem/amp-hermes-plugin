@@ -1,0 +1,16 @@
+# Template — copy this file to ~/.hermes/research_topics.yaml and edit the
+# topics list (1-5 topics). Loaded and validated at runtime by the
+# amp_load_research_topics tool (research_config.py), then read by
+# skills/research-agent/SKILL.md to build a proposed plan submitted to
+# AHP's evaluate_proposed_plan() for AMP governance approval. AHP's own
+# Python code never interprets the topics themselves — the plan's `payload`
+# field carrying them is opaque to AMP governance.
+
+topics:
+  - AI agent governance
+  - Progressive autonomy
+  - Human-in-the-loop systems
+
+research_depth: standard
+sources_per_topic: 5
+lookback_days: 7

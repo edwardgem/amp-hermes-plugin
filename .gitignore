@@ -5,3 +5,9 @@ __pycache__/
 .env.local
 .env.*
 !.env.example
+
+# Internal design/proposal docs -- not public-facing, kept locally only.
+examples/saas/AHP_DESIGN.md
+examples/saas/HERMES_UPSTREAM_PROPOSAL.md
+examples/saas/MUTATING_HOOK_CONTRACT_PROPOSAL.md
+examples/saas/AHP_RESEARCH_SKILL.md
