@@ -7,7 +7,8 @@ service** (`https://amp.inquiryon.com`). If you meant to self-host AMP
 instead, go back to [`README.md`](README.md) and follow the OSS branch —
 this page doesn't apply there.
 
-This plugin connects a Hermes agent to AMP so AMP can:
+This plugin (also referred to as the AMP-Hermes Plugin, or AHP) connects
+a Hermes agent to AMP so AMP can:
 
 - log prompts and governed tool activity
 - evaluate tool calls against an AMP `eval-policy`
@@ -15,6 +16,32 @@ This plugin connects a Hermes agent to AMP so AMP can:
 - block governed actions when AMP rejects them
 - add date-aware routing context for time-sensitive prompts so Hermes is more likely to use `web_search` for current information
 - notify the active Hermes channel when AMP is waiting for human review and when that review is resolved
+
+If you already run Hermes, you can have this running in a few minutes.
+
+## What You'll Experience
+
+- ✅ Connect Hermes to AMP
+- ✅ Experience runtime governance
+- ✅ Observe policy evaluation
+- ✅ Approve a HITL request
+- ✅ View execution audit logs
+
+```
+            User
+              │
+              ▼
+      Hermes AI Agent
+              │
+              ▼
+      AMP-Hermes Plugin (AHP)
+              │
+              ▼
+      AMP Governance Platform
+      ┌────────┼────────┐
+      ▼        ▼        ▼
+   Policies   HITL   Audit Logs
+```
 
 ## What this plugin governs
 
@@ -41,49 +68,46 @@ Before installing this plugin, make sure you already have:
 - Hermes installed and running on your machine — see [`README.md`](README.md)'s Prerequisites if you haven't done this yet
 - a working Hermes channel or chat surface, such as Slack
 - an AMP SaaS account at `https://amp.inquiryon.com`
-- an AMP agent created for Hermes
-- the following AMP values:
-  - `AMP_BACKEND_URL`
-  - `AMP_API_KEY`
-  - `AMP_ORG_ID`
-  - `AMP_AGENT_NAME`
-  - `AMP_USERNAME`
 
-## Files you need from this repo
+## Quick Start
 
-Create one plugin folder under your Hermes home:
+**1. Register a Hermes Remote Agent in AMP** — in the AMP UI:
 
-- default Hermes home: `~/.hermes`
-- plugin folder: `~/.hermes/plugins/amp-governance`
+> **Tip:** Use the **AMP Quick Start** wizard to auto-complete Steps 1-3
+> below (recommended).
 
-Copy these files from this repo's `examples/saas/` directory into that folder:
+If you'd rather do it manually, or aren't using AMP UI: log in to AMP →
+**Agent Launchpad** → register a new **remote agent** for Hermes
+(mention "Hermes" in the agent name or description so AMP AI can
+recommend a relevant policy) → check **Allow auto-start** → **Register**.
 
-- `plugin.yaml`
-- `__init__.py`
-- `amp_client.py`
-- `config.py`
-- `policy.py`
-- `session_store.py`
+**2. Create (or use) an AMP API Key** — open the side menu → **Settings**
+to copy an existing API key or create a new one.
 
-The final layout should look like this:
+**3. Attach a governance policy** — on the **Agent Launchpad** page, open
+your registered agent. On the side menu, under **Governance** → **Write
+New Policy** → **Rule-based Policy** (also called eval-policy) → use the
+AI icon to generate a starter Hermes policy → activate it. This step
+should define rules for the normalized tool/action pairs listed above.
 
-```text
-~/.hermes/
-  plugins/
-    amp-governance/
-      plugin.yaml
-      __init__.py
-      amp_client.py
-      config.py
-      policy.py
-      session_store.py
+You now have `AMP_API_KEY` and `AMP_AGENT_NAME`. Find `AMP_ORG_ID` and
+`AMP_USERNAME` under **My Profile**. Remember them for Step 5.
+
+**4. Install the plugin** — on the machine where your Hermes agent runs,
+run one command:
+
+```bash
+hermes plugins install inquiryon/amp-hermes-plugin/examples/saas --enable
 ```
 
-## Install options
+This clones the repo, installs the `examples/saas/` subdirectory as the
+`amp-governance` plugin, and enables it in one step.
 
-### Option A — copy files
+<details>
+<summary>Alternative: manual copy or symlink</summary>
 
-Use this when you want a normal local install from a downloaded repo snapshot.
+Use manual copy for a normal local install from a downloaded repo
+snapshot:
 
 ```bash
 mkdir -p ~/.hermes/plugins/amp-governance
@@ -94,50 +118,18 @@ cp /path/to/amp-hermes-plugin/examples/saas/amp_client.py ~/.hermes/plugins/amp-
 cp /path/to/amp-hermes-plugin/examples/saas/config.py ~/.hermes/plugins/amp-governance/
 cp /path/to/amp-hermes-plugin/examples/saas/policy.py ~/.hermes/plugins/amp-governance/
 cp /path/to/amp-hermes-plugin/examples/saas/session_store.py ~/.hermes/plugins/amp-governance/
-```
 
-### Option B — symlink the repo's saas example
-
-Use this when you are developing the plugin locally and want edits to take effect from the repo.
-
-```bash
-mkdir -p ~/.hermes/plugins
-ln -s /path/to/amp-hermes-plugin/examples/saas ~/.hermes/plugins/amp-governance
-```
-
-## Step 1 — enable the plugin
-
-Before configuring AMP governance, first install Hermes in your environment and verify that Hermes is working correctly. Once Hermes is running successfully, enable this plugin:
-
-```bash
 hermes plugins enable amp-governance
 ```
 
-## Step 2 — register your Hermes agent in AMP
+Use symlink instead if you're developing the plugin locally — see
+"Local Development" at the bottom of this page.
 
-Before this plugin can govern Hermes, your Hermes agent must be registered in AMP.
+</details>
 
-> **Tip:** Use the **AMP Quick Start** wizard in the AMP UI to auto-complete
-> registration, API key creation, and policy attachment in one guided flow
-> (recommended) — it does everything Steps 2 and 5 below cover manually.
-
-If you'd rather do it manually, or aren't using AMP UI:
-
-1. Create a user account at amp.inquiryon.com if you haven't done so.
-2. Login to AMP (amp.inquiryon.com).
-3. Go to **Agent Launchpad**
-4. Create / register a new remote agent for Hermes.
-5. Use a name or put in a description that relates to Hermes so that AMP AI can help you select a relevant policy.
-6. Select **Allow auto-start** at the Registration popup.
-7. Click **Register**
-8. Create an AMP API Key if you do not have one.
-9. Copy the generated values for:
-   - `AMP_API_KEY`
-   - `AMP_AGENT_NAME`
-
-## Step 3 — add AMP settings to Hermes
-
-Copy `examples/saas/.env.example` into your Hermes home as `~/.hermes/.env`, then fill in your real AMP values:
+**5. Configure environment variables** — add your AMP credentials to
+`~/.hermes/.env` (or wherever your Hermes install directory is). Copy
+`examples/saas/.env.example` as a starting point:
 
 ```env
 AMP_BACKEND_URL=https://amp.inquiryon.com
@@ -146,7 +138,6 @@ AMP_API_KEY=amp_k_...
 AMP_ORG_ID=O-0011-AB202605010...
 AMP_AGENT_NAME=your-hermes-agent-10c8
 ```
-You can find your username and org_id in **My Profile** on the side menu in AMP.
 
 Optional settings:
 
@@ -162,9 +153,7 @@ Notes:
 - `AMP_FAIL_CLOSED=true` is recommended for governance-focused deployments
 - if you use a custom Hermes home, set `HERMES_HOME` and place `.env` under that directory
 
-## Step 4 — restart Hermes gateway
-
-Run:
+**6. Restart Hermes:**
 
 ```bash
 hermes gateway restart
@@ -172,71 +161,37 @@ hermes gateway restart
 
 If the gateway is not running yet, start it the way you normally run Hermes.
 
-## Step 5 — create or install an AMP eval policy
+**7. Run your first governed command** — send this through your Hermes
+channel:
 
-This plugin expects your Hermes AMP agent to have an active `eval-policy`.
+- Log in to AMP and open **Agent Log** from the side menu. Then send
+  this query on your Hermes channel: `Can you give me recent news on SS
+  frauds?` — a plain governed tool call.
 
-Already used the **AMP Quick Start** wizard in Step 2? It attaches a
-starter policy for you — skip this step and go to Step 6.
+You should see transparency logs appear on the AMP **Agent Log** page,
+and this query will trigger HITL approval before Hermes executes it. See
+"Verify Everything Works" below to confirm it's genuinely governed, not
+just running.
 
-At minimum, that policy should define rules for the normalized tool/action pairs listed above.
+## Verify Everything Works
 
-If you are using AMP UI:
+Check these places while (or after) running the command above:
 
-1. Login to amp.inquiryon.com
-2. Go to **Agent Launchpad**.
-3. Open your Hermes agent created above by clicking on its tile.
-4. On the side menu, under **Governance**, choose **Write New Policy**.
-5. Choose **eval-policy**.
-6. Click on the AI icon on the page and use AI to help suggest a Hermes policy sample.
-7. Create and activate the policy by following the screen instruction.
+**Hermes**
 
-## Step 6 — test the integration
+- The command pauses when approval is required, with a message like:
+  - `[AMP] AMP is waiting for a human reviewer to approve "web_search" before continuing. This action is paused pending review.`
+- Hermes receives an approval/rejection notification once a reviewer acts:
+  - `[AMP] AMP reviewer approved "web_search". Continuing now.`
+  - `[AMP] AMP reviewer rejected "web_search". ...`
+- For time-sensitive prompts, Hermes uses `web_search` instead of answering only from model memory.
 
-Send a simple prompt to Hermes that should use a governed tool.
+**AMP**
 
-Examples:
+- The agent's activity log timeline shows entries like: session started, user prompt logged, policy check for a normalized tool/action, policy decision, and HITL requested (if approval is required).
+- The workitems page shows a pending HITL item, if one was triggered. Click the workitem ID, or go to the Agent Worktray page, to approve the request.
 
-- `Can you run git status in ~/Projects/my-repo?`
-- `Can you read ~/Projects/my-repo/README.md?`
-- `Can you search for files named policy.json under ~/Projects/agents/?`
-- `How did the US market perform today?`
-- `Please perform a web search for the latest news about social security fraud in the US.`
-
-Expected behavior:
-
-- AMP should log the Hermes session and tool activity
-- safe actions should proceed normally
-- time-sensitive or explicitly live-information prompts should be routed toward `web_search` using injected current-date context
-- blocked actions should return:
-  - `This request is blocked by AMP governance. No action was taken.`
-- HITL actions should pause until a reviewer approves or rejects them in AMP
-- when Hermes is running in a messaging surface such as Slack, the plugin should post a channel message when AMP is waiting for review and another message when the review is resolved
-
-## How to verify it is working
-
-Check these places:
-
-- Hermes gateway logs
-- Hermes chat surface, such as Slack
-- AMP agent log for the Hermes agent
-- AMP workitems page if HITL is triggered
-
-You should see AMP entries similar to:
-
-- session started
-- user prompt logged
-- policy check for a normalized tool/action
-- policy decision
-- HITL requested, if approval is required
-
-For time-sensitive prompts, you should also see Hermes use `web_search` instead of answering only from model memory.
-
-For HITL prompts in Slack, you should also see channel messages similar to:
-
-- `[AMP] AMP is waiting for a human reviewer to approve "web_search" before continuing. This action is paused pending review.`
-- `[AMP] AMP reviewer approved "web_search". Continuing now.`
-- `[AMP] AMP reviewer rejected "web_search". ...`
+🎉 **Congratulations! Your Hermes agent is now governed by AMP.**
 
 ## Common issues
 
@@ -277,8 +232,11 @@ Check:
 - reviewer assignment in the AMP policy or HITL setup
 - `AMP_HITL_TIMEOUT_MINUTES`
 - AMP workitems page for pending approvals
+- `HERMES_AGENT_TIMEOUT` — if HITL reviews take more than 30 minutes, set this to a higher value (e.g., `HERMES_AGENT_TIMEOUT=7200`)
 
-## Files in this plugin
+## Developer Notes
+
+### Files in this plugin
 
 - `examples/saas/plugin.yaml` — Hermes plugin manifest
 - `examples/saas/__init__.py` — main plugin hooks and governance flow
@@ -289,24 +247,15 @@ Check:
 - `examples/saas/.env.example` — example environment variables for setup
 - `LICENSE` — MIT open-source license
 
-## Recommended first setup path
+### Local Development
 
-If you are setting this up for the first time, follow this order:
-
-1. install Hermes and confirm your chat channel works
-2. copy `examples/saas/` into `~/.hermes/plugins/amp-governance`
-3. enable the plugin
-4. create a Hermes agent in AMP
-5. add AMP variables to `~/.hermes/.env`
-6. restart Hermes gateway
-7. activate an AMP `eval-policy` for the Hermes agent
-8. test one safe command and one HITL-triggering command
-
-## Development note
-
-For local development, symlink install is easier because Hermes will load the plugin directly from your working repo:
+For local development, symlink install is easier than `hermes plugins
+install` because Hermes will load the plugin directly from your working
+repo, and edits take effect on the next gateway restart with no
+reinstall step:
 
 ```bash
+mkdir -p ~/.hermes/plugins
 ln -s /path/to/amp-hermes-plugin/examples/saas ~/.hermes/plugins/amp-governance
 hermes plugins enable amp-governance
 hermes gateway restart
