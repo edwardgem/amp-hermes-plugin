@@ -2,17 +2,27 @@
 
 Governs Hermes tool calls through `amp-community`'s self-hosted OSS API
 using the [`amp-sdk-python`](https://github.com/inquiryon/amp-sdk-python)
-typed client. Same policy and governance logic as `../rest/` — only the
-client differs. See `../README.md` first for prerequisites (a running
-`amp-community` instance and the shared policy).
+typed client. Same policy and governance logic as
+[`../rest/`](../rest/) — only the client differs.
 
-## Install as a Hermes plugin
+**Start at [`../README.md`](../README.md) first** if you haven't already
+— it covers the prerequisites (getting `amp-community` running, your
+tokens, importing the shared policy) that this page assumes are done.
+Once you're finished here, continue to `../README.md`'s **"Step 4: Try
+it"** to see it in action. (Looking for the zero-dependency raw-REST
+version instead? See [`../rest/README.md`](../rest/README.md).)
+
+## Step 1: Install as a Hermes plugin
+
+Copy this directory into your Hermes plugins folder:
 
 ```bash
 cp -r examples/oss/sdk-python ~/.hermes/plugins/amp-oss-sdk-example
 ```
 
-Add it to `~/.hermes/config.yaml`'s `plugins.enabled` list:
+Then add `amp-oss-sdk-example` to the `plugins.enabled` list in
+`~/.hermes/config.yaml`. Paste this block in (or hand it to your AI
+coding agent to apply):
 
 ```yaml
 plugins:
@@ -20,11 +30,11 @@ plugins:
     - amp-oss-sdk-example
 ```
 
-(If you already have `amp-governance` enabled for SaaS, either list both,
-or swap one out temporarily — they don't conflict, but running both at
-once double-governs every tool call.)
+If `plugins.enabled` already exists with other entries, add
+`amp-oss-sdk-example` as a new list item instead of replacing the block
+— don't remove plugins you already have there unless you mean to.
 
-## Install the SDK — into Hermes's own venv
+## Step 2: Install the SDK — into Hermes's own venv
 
 Unlike `../rest/`, this example depends on `amp-sdk-python`, which isn't
 published to PyPI yet — install it from a local clone. Hermes runs in its
@@ -35,33 +45,39 @@ own dedicated virtualenv (not your system Python), so install into
 ~/.hermes/hermes-agent/venv/bin/pip install -e /path/to/amp-sdk-python
 ```
 
-(If your Hermes installation puts its venv somewhere else, adjust the
-path — check `head -5 $(which hermes)` to see where it actually points.)
+If your Hermes installation puts its venv somewhere else, adjust the
+path — `head -5 $(which hermes)` shows where it actually points.
 
-## Configure
+## Step 3: Configure
 
-Add to `~/.hermes/.env`:
+Add these lines to `~/.hermes/.env`:
 
 ```bash
 AMP_OSS_BASE_URL=http://127.0.0.1:8080
-AMP_OSS_AGENT_TOKEN=<your-service-token>
+AMP_OSS_AGENT_TOKEN=amp_k_test_CHANGE-ME-agent
 AMP_OSS_POLICY_ID=hermes-oss-governance
 ```
 
-`AMP_OSS_POLICY_ID` defaults to `hermes-oss-governance` if unset, matching
-the policy id used in `../README.md`'s prerequisites. Optional:
-`AMP_OSS_HITL_TIMEOUT_MINUTES` (default `10`),
-`AMP_OSS_HITL_POLL_INTERVAL_SECONDS` (default `3`),
-`AMP_OSS_FAIL_CLOSED` (default `true` — block, not allow, when AMP is
-unreachable or unconfigured).
+The values above match `amp-community`'s example config exactly — if you
+followed its README as-is, you can paste this block unmodified.
+`AMP_OSS_AGENT_TOKEN` must be the **`service`**-role token (not the
+`reviewer` token — see `../README.md`'s "Step 2: Know your tokens" for
+why that distinction matters).
 
-Restart Hermes to pick up the new plugin and env vars.
+`AMP_OSS_POLICY_ID` defaults to `hermes-oss-governance` even if you omit
+this line, matching the policy id from `../README.md`'s Step 3. Optional,
+all with sensible defaults if omitted:
 
-## Try it
+| Variable | Default | Meaning |
+|---|---|---|
+| `AMP_OSS_HITL_TIMEOUT_MINUTES` | `10` | how long to wait for a reviewer before blocking |
+| `AMP_OSS_HITL_POLL_INTERVAL_SECONDS` | `3` | how often to check for a decision while waiting |
+| `AMP_OSS_FAIL_CLOSED` | `true` | block (not allow) when AMP is unreachable or unconfigured |
 
-Same as `../rest/`: ask Hermes to run a command matching one of the
-governed criteria (a `terminal` call containing `sudo`, a `write_file`
-call targeting a path containing `.env`, etc.). The tool call pauses;
-approve or reject it from `amp-community`'s Operator UI worktray
-(`http://127.0.0.1:8080/`) or via `curl POST /api/v0/hitl/{id}/resolve`
-as documented in `amp-community`'s own README.
+## Step 4: Restart Hermes
+
+Restart Hermes to pick up the new plugin, the newly-installed SDK, and
+the env vars.
+
+**Done — continue to [`../README.md`](../README.md)'s "Step 4: Try it"**
+for example prompts and how to approve/reject/inspect them.
