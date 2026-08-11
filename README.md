@@ -37,8 +37,8 @@ Hermes tools are normalized into AMP policy vocabulary like this:
 
 ### Using AMP SaaS?
 
-Follow **[`AMP_SaaS_Hermes.md`](AMP_SaaS_Hermes.md)** — you can ignore the rest of this file.
+Follow **[`AMP_SaaS_Hermes.md`](AMP_SaaS_Hermes.md)**.
 
 ### Using AMP Community Edition (OSS)?
 
-Follow **[`AMP_OSS_Hermes.md`](AMP_OSS_Hermes.md)** — you can ignore the rest of this file.
+Follow **[`AMP_OSS_Hermes.md`](AMP_OSS_Hermes.md)**.
