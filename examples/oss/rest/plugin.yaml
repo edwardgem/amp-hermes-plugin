@@ -1,0 +1,6 @@
+name: amp-oss-rest-example
+version: "0.1.0"
+description: "Example: govern Hermes tool calls through amp-community's self-hosted OSS REST API directly (raw urllib, zero third-party dependencies). See examples/oss/README.md for how this compares to the sdk-python example."
+author: "Inquiryon"
+hooks:
+  - pre_tool_call

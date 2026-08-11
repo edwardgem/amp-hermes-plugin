@@ -1,0 +1,6 @@
+name: amp-oss-sdk-example
+version: "0.1.0"
+description: "Example: govern Hermes tool calls through amp-community's self-hosted OSS API using the amp-sdk-python typed client. Same policy and logic as the rest/ example; only the client differs. See examples/oss/README.md."
+author: "Inquiryon"
+hooks:
+  - pre_tool_call
