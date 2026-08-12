@@ -382,6 +382,14 @@ class AmpGovernancePlugin:
             "AMP_BACKEND_URL, AMP_API_KEY, AMP_ORG_ID, AMP_USERNAME, AMP_AGENT_NAME or AGENT_NAME"
         )
 
+    def _config_fingerprint(self) -> str:
+        return "|".join([
+            self._config.backend_url,
+            self._config.org_id,
+            self._config.agent_name,
+            self._config.api_key,
+        ])
+
     def _ensure_instance(
         self,
         session_id: str,
@@ -389,9 +397,11 @@ class AmpGovernancePlugin:
         model: str = "",
         platform: str = "",
     ) -> str:
+        fingerprint = self._config_fingerprint()
         record = self._store.get(session_id)
-        if record:
+        if record and record.agent_fingerprint == fingerprint:
             return record.instance_id
+        reconnected = record is not None
         instance_id = self._client.init_instance(session_id, model, platform)
         self._store.put(
             SessionRecord(
@@ -399,9 +409,13 @@ class AmpGovernancePlugin:
                 instance_id=instance_id,
                 model=model,
                 platform=platform,
+                agent_fingerprint=fingerprint,
             )
         )
-        self._safe_log(instance_id, f"AMP-governed Hermes session started | platform={platform} | model={model}")
+        if reconnected:
+            self._safe_log(instance_id, f"AMP-governed Hermes session re-initialized after config change | platform={platform} | model={model}")
+        else:
+            self._safe_log(instance_id, f"AMP-governed Hermes session started | platform={platform} | model={model}")
         return instance_id
 
     def _safe_log(self, instance_id: str, message: str, *, level: str = "INFO") -> None:

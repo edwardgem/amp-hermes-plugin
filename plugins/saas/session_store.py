@@ -31,6 +31,14 @@ class SessionRecord:
     platform: str = ""
     created_at: str = ""
     last_seen_at: str = ""
+    # Fingerprint of the AMP config (backend/org/agent/api key) active when
+    # this record was created. A cached instance_id is only safe to reuse if
+    # the plugin is still talking to the same AMP agent — without this, a
+    # Hermes session that outlives an .env change (e.g. re-pointing at a new
+    # agent during QSJ setup) keeps reusing the old agent's instance_id and
+    # never calls init_instance() again, so AMP never records a fresh
+    # connection for the new agent.
+    agent_fingerprint: str = ""
 
     @classmethod
     def from_dict(cls, payload: Dict[str, str]) -> "SessionRecord":
