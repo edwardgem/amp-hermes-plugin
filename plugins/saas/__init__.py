@@ -761,6 +761,14 @@ class AmpGovernancePlugin:
                 f'No active AMP governance policy for agent "{self._config.agent_name}".'
             )
 
+        if status in {"policy_error", "config_error", "error"}:
+            return self._block_message(
+                reason or (
+                    f'AMP policy for agent "{self._config.agent_name}" is misconfigured; '
+                    f'"{action.raw_tool_name}" was blocked.'
+                )
+            )
+
         if status in {"no-hitl", "allow", "allowed", "approved"}:
             return None
 

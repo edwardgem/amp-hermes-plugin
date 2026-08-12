@@ -39,7 +39,7 @@ class AmpClient:
             data = json.dumps(payload).encode("utf-8")
         req = Request(url, data=data, headers=self._headers(), method=method)
         try:
-            with urlopen(req, timeout=15) as resp:
+            with urlopen(req, timeout=30) as resp:
                 body = resp.read().decode("utf-8") or "{}"
                 return json.loads(body)
         except HTTPError as exc:
@@ -96,6 +96,12 @@ class AmpClient:
         )
 
     def request_hitl(self, instance_id: str, action: NormalizedAction) -> Dict[str, Any]:
+        """Submit a governed tool action for eval-policy/HITL review.
+
+        The payload uses the normalized Hermes tool/action names plus the
+        tool-specific context extracted by the policy normalizer. AMP then
+        decides allow/no-hitl, pending HITL, or a policy/config error.
+        """
         return self._request(
             "POST",
             "/api/hitl/request",
@@ -115,6 +121,12 @@ class AmpClient:
         )
 
     def get_hitl_decision(self, instance_id: str) -> Dict[str, Any]:
+        """Poll the normalized decision endpoint for a caller instance.
+
+        Returns a compact decision state (`pending` or `complete`) without
+        exposing the internal workitem-stage routing details AMP uses behind
+        the scenes.
+        """
         return self._request(
             "GET",
             "/api/hitl/get-decision",
