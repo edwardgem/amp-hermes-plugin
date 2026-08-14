@@ -5,10 +5,17 @@ import os
 from pathlib import Path
 from typing import Dict
 
+from hermes_constants import get_hermes_home, get_env_path
+
 
 def _hermes_home() -> Path:
-    raw = os.environ.get("HERMES_HOME", "").strip()
-    return Path(raw).expanduser() if raw else Path.home() / ".hermes"
+    """Delegates to hermes_constants.get_hermes_home() — the real, single
+    source of truth (env var override + context-var override + profile
+    awareness + platform-native default). The plugin previously reimplemented
+    a simplified version of this locally (HERMES_HOME env var only, POSIX-only
+    default), which silently diverged from core on Windows and under
+    `hermes profile use` without HERMES_HOME set."""
+    return get_hermes_home()
 
 
 def _read_env_file(path: Path) -> Dict[str, str]:
@@ -99,7 +106,7 @@ class AmpConfig:
 
 
 def load_config() -> AmpConfig:
-    env_file = _read_env_file(_hermes_home() / ".env")
+    env_file = _read_env_file(get_env_path())
     backend_url = _env_value("AMP_BACKEND_URL", env_file)
     api_key = _env_value("AMP_API_KEY", env_file)
     org_id = _env_value("AMP_ORG_ID", env_file)

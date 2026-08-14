@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import json
-import os
 from pathlib import Path
 import threading
 from typing import Dict, Optional
+
+from hermes_constants import get_hermes_home
 
 
 def _utc_now() -> str:
@@ -14,11 +15,12 @@ def _utc_now() -> str:
 
 
 def _state_path() -> Path:
-    raw = os.environ.get("HERMES_HOME", "").strip()
-    hermes_home = Path(raw).expanduser() if raw else Path.home() / ".hermes"
-    if not str(raw):
-        hermes_home = Path.home() / ".hermes"
-    state_dir = hermes_home / "plugin_state" / "amp-governance"
+    # Uses the real hermes_constants.get_hermes_home() (env var + context-var
+    # override + profile awareness + platform-native default) rather than a
+    # local HERMES_HOME-env-var-only reimplementation, which silently wrote
+    # session state to the wrong place under a non-default profile or on
+    # Windows.
+    state_dir = get_hermes_home() / "plugin_state" / "amp-governance"
     state_dir.mkdir(parents=True, exist_ok=True)
     return state_dir / "sessions.json"
 

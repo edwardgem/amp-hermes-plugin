@@ -1557,6 +1557,19 @@ def register(ctx) -> None:
     ctx.register_hook("post_api_request", _PLUGIN.post_api_request)
     ctx.register_hook("transform_llm_output", _PLUGIN.transform_llm_output)
 
+    from .cli import register_cli, amp_command
+    ctx.register_cli_command(
+        name="amp",
+        help="AMP governance setup commands",
+        setup_fn=register_cli,
+        handler_fn=amp_command,
+        description=(
+            "Connect this Hermes agent to AMP in one step: writes AMP_* keys "
+            "to .env and restarts the gateway, printing each step as it "
+            "happens. Run after `hermes plugins install ... --enable`."
+        ),
+    )
+
     # Phase 3B: tools + plugin-bundled skill for the research-agent sample.
     # These are ordinary registered tools dispatched inside the model's own
     # conversational turn — see the comment above _current_session_id() for why.
